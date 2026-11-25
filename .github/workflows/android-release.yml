@@ -91,8 +91,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          npm ci || npm install
-          npm install @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 @capacitor/local-notifications@^7
+          npm ci || npm install --legacy-peer-deps
+          npm install --legacy-peer-deps @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 @capacitor/local-notifications@^7
 
       - name: Build web app
         run: npm run build
@@ -101,6 +101,12 @@ jobs:
         run: |
           test -d android || { echo "Android project not found. Run the bootstrap workflow first."; exit 1; }
           test -f android/app/build.gradle
+
+      - name: Verify custom URL scheme in AndroidManifest
+        run: |
+          grep -n 'android:scheme="sadiqalmuslim"' android/app/src/main/AndroidManifest.xml
+          grep -n 'android.intent.action.VIEW' android/app/src/main/AndroidManifest.xml
+          grep -n 'android.intent.category.BROWSABLE' android/app/src/main/AndroidManifest.xml
 
       - name: Restore keystore from secrets
         if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
@@ -168,6 +174,7 @@ jobs:
 
             - مصحف متكامل على الويب: قراءة بالرسم العثماني، تلاوة القراء، تفسير، حفظ، وتتبع الختمة.
             - تذكيرات محلية بإشعارات أندرويد.
+            - مخطط الرابط المخصص: sadiqalmuslim (يفتح التطبيق من زر «افتح التطبيق» في المعرض).
             - بصمة SHA-256 للشهادة: ${{ steps.verify.outputs.sha256 }}
           files: android/app/build/outputs/apk/release/app-release.apk
           draft: false
