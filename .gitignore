@@ -6,3 +6,15 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Android / Capacitor
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+
+# مفاتيح توقيع أندرويد — لا تُرفع أبداً إلى المستودع
+*.keystore
+*.jks
+android/keystore.properties
+android/release.keystore
