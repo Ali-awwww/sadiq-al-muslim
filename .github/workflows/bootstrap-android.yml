@@ -26,7 +26,6 @@ jobs:
           from pathlib import Path
           import shutil
           pairs = {
-              'capacitor.config.ts/capacitor.config.ts': 'capacitor.config.ts',
               'src/lib/nativeReminders.ts/nativeReminders.ts': 'src/lib/nativeReminders.ts',
               'assets/icon.svg/icon.svg': 'assets/icon.svg',
               'assets/splash.svg/splash.svg': 'assets/splash.svg',
@@ -45,7 +44,7 @@ jobs:
                   shutil.move(str(tmp), str(d))
                   print(f'restored {src} -> {dst}')
           PY
-          ls -l capacitor.config.ts src/lib/nativeReminders.ts assets/icon.svg assets/splash.svg public/icon.svg
+          ls -l capacitor.config.js src/lib/nativeReminders.ts assets/icon.svg assets/splash.svg public/icon.svg
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -63,6 +62,7 @@ jobs:
 
       - name: Add Android project and generate icons
         run: |
+          test -f capacitor.config.js
           npx cap add android
           npx @capacitor/assets generate --android
           npx cap sync android
