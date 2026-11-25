@@ -1,7 +1,8 @@
 name: Bootstrap Android (Capacitor)
 
 # يضيف مشروع Android إلى التطبيق عبر Capacitor، ويولّد الأيقونات،
-# ويضبط التوقيع والأذونات. يُشغَّل يدوياً فقط من تبويب Actions.
+# ويضبط التوقيع والأذونات ومخطط الرابط المخصص sadiqalmuslim.
+# يُشغَّل يدوياً فقط من تبويب Actions.
 # بعد نجاحه، شغّل android-release.yml لبناء نسخة موقّعة.
 
 on:
@@ -53,9 +54,9 @@ jobs:
 
       - name: Install Capacitor dependencies
         run: |
-          npm install
-          npm install @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 @capacitor/local-notifications@^7
-          npm install -D @capacitor/assets@^3
+          npm install --legacy-peer-deps
+          npm install --legacy-peer-deps @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 @capacitor/local-notifications@^7
+          npm install --legacy-peer-deps -D @capacitor/assets@^3
 
       - name: Build web app
         run: npm run build
@@ -69,7 +70,7 @@ jobs:
       - name: Show generated Android build file
         run: cat android/app/build.gradle
 
-      - name: Patch Android project (release signing + notification permissions)
+      - name: Patch Android project (release signing + notification permissions + custom URL scheme)
         run: |
           python3 - <<'PY'
           import re
@@ -113,6 +114,17 @@ jobs:
           for perm in perms:
               if perm not in mtxt:
                   mtxt = mtxt.replace('<application', perm + '\n    <application', 1)
+          if 'android:scheme="sadiqalmuslim"' not in mtxt:
+              scheme_filter = (
+                  '        <intent-filter>\n'
+                  '            <action android:name="android.intent.action.VIEW" />\n'
+                  '            <category android:name="android.intent.category.DEFAULT" />\n'
+                  '            <category android:name="android.intent.category.BROWSABLE" />\n'
+                  '            <data android:scheme="sadiqalmuslim" />\n'
+                  '        </intent-filter>\n'
+              )
+              assert '</intent-filter>' in mtxt, 'MainActivity intent-filter not found in AndroidManifest.xml'
+              mtxt = mtxt.replace('</intent-filter>', '</intent-filter>\n' + scheme_filter, 1)
           mf.write_text(mtxt)
           print(mf.read_text())
           PY
@@ -125,6 +137,7 @@ jobs:
           test -f android/app/build.gradle
           grep -n "POST_NOTIFICATIONS" android/app/src/main/AndroidManifest.xml
           grep -n "keystoreProperties" android/app/build.gradle
+          grep -n 'android:scheme="sadiqalmuslim"' android/app/src/main/AndroidManifest.xml
 
       - name: Commit Android project
         run: |
