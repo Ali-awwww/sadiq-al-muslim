@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2732 2732">
+  <rect width="2732" height="2732" fill="#0f766e"/>
+  <g transform="translate(683 683) scale(1.3333)">
+    <circle cx="512" cy="176" r="72" fill="#fbbf24"/>
+    <circle cx="542" cy="152" r="62" fill="#0f766e"/>
+    <path d="M668 108l14 34 34 14-34 14-14 34-14-34-34-14 34-14z" fill="#fbbf24"/>
+    <path fill="#ffffff" d="M496 312c-66-40-156-48-232-28v420c76-20 166-12 232 28 66-40 156-48 232-28V284c-76-20-166-12-232 28z"/>
+    <rect x="504" y="306" width="16" height="424" fill="#0f766e" opacity="0.25"/>
+    <g fill="#0f766e" opacity="0.55">
+      <rect x="296" y="356" width="152" height="18" rx="9"/>
+      <rect x="296" y="412" width="152" height="18" rx="9"/>
+      <rect x="296" y="468" width="152" height="18" rx="9"/>
+      <rect x="296" y="524" width="110" height="18" rx="9"/>
+      <rect x="576" y="356" width="152" height="18" rx="9"/>
+      <rect x="576" y="412" width="152" height="18" rx="9"/>
+      <rect x="576" y="468" width="152" height="18" rx="9"/>
+      <rect x="576" y="524" width="110" height="18" rx="9"/>
+    </g>
+    <path d="M512 636l10 24 24 10-24 10-10 24-10-24-24-10 24-10z" fill="#fbbf24"/>
+  </g>
+</svg>
