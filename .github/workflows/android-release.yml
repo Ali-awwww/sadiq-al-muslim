@@ -1,0 +1,175 @@
+name: Android release (signed APK)
+
+# يبني APK موقّعاً للإصدار من مشروع Android، ويتحقق أن توقيعه وبصمته
+# SHA-256 يطابقان الـ Keystore الجديد، ثم ينشئ إصدار GitHub v1.0
+# مرفقاً به الـ APK عند طلب ذلك.
+#
+# الأسرار المطلوبة في المستودع:
+#   ANDROID_KEYSTORE_BASE64 : نسخة base64 من الـ Keystore (ملف release.keystore)
+#   KEYSTORE_PASSWORD       : كلمة مرور مخزن المفاتيح
+#   KEY_ALIAS               : upload
+#   KEY_PASSWORD            : كلمة مرور المفتاح
+# تُجهَّز هذه الأسرار مرة واحدة من أثر سير عمل generate-keystore.yml،
+# ولا يُلتزم الـ Keystore ولا كلمات المرور في المستودع أبداً.
+
+on:
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'إنشاء إصدار GitHub v1.0 مرفقاً به الـ APK؟'
+        required: true
+        type: boolean
+        default: true
+      tag:
+        description: 'وسم الإصدار'
+        required: true
+        type: string
+        default: v1.0
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'assets/**'
+      - 'capacitor.config.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.ts'
+      - 'index.html'
+      - '.github/workflows/android-release.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore misplaced files to their intended paths
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          pairs = {
+              'capacitor.config.ts/capacitor.config.ts': 'capacitor.config.ts',
+              'src/lib/nativeReminders.ts/nativeReminders.ts': 'src/lib/nativeReminders.ts',
+              'assets/icon.svg/icon.svg': 'assets/icon.svg',
+              'assets/splash.svg/splash.svg': 'assets/splash.svg',
+              'public/icon.svg/icon.svg': 'public/icon.svg',
+          }
+          for src, dst in pairs.items():
+              s = Path(src)
+              if s.is_file():
+                  d = Path(dst)
+                  tmp = Path(dst + '.tmp-restore')
+                  shutil.move(str(s), str(tmp))
+                  try:
+                      s.parent.rmdir()
+                  except OSError:
+                      pass
+                  shutil.move(str(tmp), str(d))
+                  print(f'restored {src} -> {dst}')
+          PY
+          ls -l capacitor.config.ts src/lib/nativeReminders.ts assets/icon.svg assets/splash.svg public/icon.svg
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: |
+          npm ci || npm install
+          npm install @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 @capacitor/local-notifications@^7
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Check Android project exists
+        run: |
+          test -d android || { echo "Android project not found. Run the bootstrap workflow first."; exit 1; }
+          test -f android/app/build.gradle
+
+      - name: Restore keystore from secrets
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/release.keystore
+          cat > android/keystore.properties <<EOF
+          keyAlias=upload
+          keyPassword=$KEY_PASSWORD
+          storeFile=release.keystore
+          storePassword=$KEYSTORE_PASSWORD
+          EOF
+          ls -l android/release.keystore android/keystore.properties
+
+      - name: Sync web build into Android
+        run: npx cap sync android
+
+      - name: Build signed release APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace
+
+      - name: Verify APK signature and SHA-256 fingerprint
+        id: verify
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          ls -lh "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --print-certs "$APK"
+          CERT_SHA=$("$APKSIGNER" verify --print-certs "$APK" | grep 'SHA-256 digest' | sed 's/.*SHA-256 digest: //')
+          echo "APK certificate SHA-256: $CERT_SHA"
+          KS_SHA=$(keytool -list -v -keystore android/release.keystore -storepass "$KEYSTORE_PASSWORD" -alias upload | grep 'SHA256:' | awk '{print $2}')
+          echo "Keystore SHA-256: $KS_SHA"
+          if [ -z "$CERT_SHA" ] || [ -z "$KS_SHA" ]; then
+            echo "Could not read SHA-256 fingerprint from APK or keystore"; exit 1
+          fi
+          if [ "$CERT_SHA" != "$KS_SHA" ]; then
+            echo "SHA-256 mismatch: APK $CERT_SHA != keystore $KS_SHA"; exit 1
+          fi
+          echo "SHA-256 fingerprint matches the keystore: $CERT_SHA"
+          echo "sha256=$CERT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sadiq-al-muslim-v1.0-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Create GitHub release v1.0
+        if: ${{ inputs.create_release && steps.verify.outputs.sha256 != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: "صديق المسلم v1.0"
+          body: |
+            أول إصدار أندرويد من تطبيق «صديق المسلم».
+
+            - مصحف متكامل على الويب: قراءة بالرسم العثماني، تلاوة القراء، تفسير، حفظ، وتتبع الختمة.
+            - تذكيرات محلية بإشعارات أندرويد.
+            - بصمة SHA-256 للشهادة: ${{ steps.verify.outputs.sha256 }}
+          files: android/app/build/outputs/apk/release/app-release.apk
+          draft: false
+          prerelease: false
