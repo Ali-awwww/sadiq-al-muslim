@@ -1,0 +1,6 @@
+{
+  "name": "صديق المسلم",
+  "description": "تطبيق مصحف إلكتروني متكامل بالخط العثماني مع التلاوة الصوتية، التفسير، التحفيظ، ومتابعة الختمة.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

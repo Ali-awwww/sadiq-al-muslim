@@ -1,0 +1,68 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  html {
+    font-family: 'Cairo', 'Tajawal', system-ui, -apple-system, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    background-color: #ffffff;
+    color: #000000;
+    overflow-x: hidden;
+  }
+
+  html.dark body {
+    background-color: #000000;
+    color: #ffffff;
+  }
+}
+
+.font-quran {
+  font-family: 'Amiri Quran', 'Amiri', Georgia, serif;
+}
+
+.font-ui {
+  font-family: 'Cairo', 'Tajawal', system-ui, -apple-system, sans-serif;
+}
+
+/* Authentic Uthmani Mushaf page paper */
+.mushaf-page-surface {
+  background-color: #fcfbf7;
+  color: #000000;
+}
+
+html.dark .mushaf-page-surface {
+  background-color: #090909;
+  color: #ffffff;
+}
+
+/* Safe area bottom padding for iPhone-style tab bar */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Crisp monochrome scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 120, 120, 0.28);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 120, 120, 0.5);
+}
+
+/* Tabular figures for numbers */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
