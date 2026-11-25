@@ -31,7 +31,7 @@ on:
       - 'src/**'
       - 'public/**'
       - 'assets/**'
-      - 'capacitor.config.js'
+      - 'capacitor.config.json'
       - 'package.json'
       - 'package-lock.json'
       - 'vite.config.ts'
@@ -72,7 +72,7 @@ jobs:
                   shutil.move(str(tmp), str(d))
                   print(f'restored {src} -> {dst}')
           PY
-          ls -l capacitor.config.js src/lib/nativeReminders.ts assets/icon.svg assets/splash.svg public/icon.svg
+          ls -l capacitor.config.json src/lib/nativeReminders.ts assets/icon.svg assets/splash.svg public/icon.svg
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
