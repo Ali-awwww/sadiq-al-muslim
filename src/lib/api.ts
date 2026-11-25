@@ -13,6 +13,7 @@ import { idbGet, idbSet } from './cache';
 export const ALQURAN_BASE = 'https://api.alquran.cloud/v1';
 export const MP3QURAN_RECITERS_URL = 'https://www.mp3quran.net/api/v3/reciters?language=ar';
 export const ALAFASY_SAMPLE_AUDIO_BASE = 'https://cdn.islamic.network/quran/audio/128/ar.alafasy';
+export const QURAN_COM_TAFSIR_BASE = 'https://api.quran.com/api/v4/tafsirs';
 
 // Exact 5 reciter IDs specified
 export const ALLOWED_RECITER_IDS = [112, 109, 92, 137, 81] as const;
@@ -28,6 +29,58 @@ async function fetchJson<T>(url: string): Promise<T> {
     throw new Error(`فشل الاتصال بالخادم (${response.status})`);
   }
   return (await response.json()) as T;
+}
+
+export const TAFSIR_EDITIONS = [
+  { id: '14', label: 'تفسير ابن كثير (Quran.com)', source: 'qurancom' },
+  { id: 'ar.muyassar', label: 'التفسير الميسر', source: 'alquran' },
+  { id: 'ar.qurtubi', label: 'تفسير القرطبي', source: 'alquran' },
+  { id: 'ar.jalalayn', label: 'تفسير الجلالين', source: 'alquran' },
+  { id: 'ar.baghawi', label: 'تفسير البغوي', source: 'alquran' },
+  { id: 'ar.waseet', label: 'التفسير الوسيط', source: 'alquran' },
+] as const;
+
+export interface QuranComTafsirAyahResult {
+  text: string;
+  resourceName: string;
+}
+
+export async function fetchIbnKathirByAyah(
+  surahNumber: number,
+  ayahNumber: number
+): Promise<FetchResult<QuranComTafsirAyahResult>> {
+  const safeSurah = Math.max(1, Math.min(114, surahNumber));
+  const safeAyah = Math.max(1, ayahNumber);
+  const cacheKey = `tafsir_qurancom_14_${safeSurah}_${safeAyah}`;
+
+  const cached = await idbGet<QuranComTafsirAyahResult>(cacheKey);
+  if (cached && cached.text) {
+    return { data: cached, fromCache: true };
+  }
+
+  const res = await fetch(`${QURAN_COM_TAFSIR_BASE}/14/by_ayah/${safeSurah}:${safeAyah}`);
+  if (!res.ok) {
+    throw new Error(`تعذر تحميل تفسير ابن كثير (${res.status})`);
+  }
+  const json = (await res.json()) as {
+    tafsir?: {
+      resource_id: number;
+      resource_name: string;
+      text: string;
+    };
+  };
+
+  if (!json?.tafsir?.text) {
+    throw new Error('لا يتوفر نص تفسير لهذه الآية');
+  }
+
+  const result: QuranComTafsirAyahResult = {
+    text: json.tafsir.text,
+    resourceName: json.tafsir.resource_name || 'ابن كثير',
+  };
+
+  await idbSet(cacheKey, result);
+  return { data: result, fromCache: false };
 }
 
 export async function fetchQuranMeta(): Promise<FetchResult<QuranMeta>> {
@@ -101,13 +154,6 @@ export async function fetchJuzUthmani(juzNumber: number): Promise<FetchResult<{ 
   return { data: json.data, fromCache: false };
 }
 
-export const TAFSIR_EDITIONS = [
-  { id: 'ar.muyassar', label: 'التفسير الميسر' },
-  { id: 'ar.qurtubi', label: 'تفسير القرطبي' },
-  { id: 'ar.jalalayn', label: 'تفسير الجلالين' },
-  { id: 'ar.baghawi', label: 'تفسير البغوي' },
-  { id: 'ar.waseet', label: 'التفسير الوسيط' },
-] as const;
 
 export async function fetchTafsir(
   surahNumber: number,

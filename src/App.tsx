@@ -68,11 +68,12 @@ function AppShell() {
     DEFAULT_MEMO_STATS
   );
 
-  const [currentPage, setCurrentPage] = useState<number>(() => lastRead?.page ?? 1);
-  const [highlightedAyahGlobal, setHighlightedAyahGlobal] = useState<number | null>(
-    null
+  const [pageZoom, setPageZoom] = useLocalStorage<number>(
+    'sadiq_mushaf_zoom_v1',
+    100
   );
-  const [tafsirTarget, setTafsirTarget] = useState<{ surah: number; ayah: number }>({
+  const [currentPage, setCurrentPage] = useState<number>(() => lastRead?.page ?? 1);
+  const [tafsirTarget] = useState<{ surah: number; ayah: number }>({
     surah: 1,
     ayah: 1,
   });
@@ -216,15 +217,9 @@ function AppShell() {
     }));
   }, [isDark, setSettings]);
 
-  const handleOpenTafsirFromAyah = useCallback((surah: number, ayah: number) => {
-    setTafsirTarget({ surah, ayah });
-    setActiveTab('understanding');
-  }, []);
-
   const handleJumpToPageFromKhatma = useCallback(
-    (page: number, ayahGlobal?: number) => {
+    (page: number) => {
       setCurrentPage(page);
-      setHighlightedAyahGlobal(ayahGlobal ?? null);
       setActiveTab('mushaf');
     },
     []
@@ -240,10 +235,7 @@ function AppShell() {
       {activeTab === 'mushaf' && (
         <MushafReader
           currentPage={currentPage}
-          onChangePage={(p) => {
-            setHighlightedAyahGlobal(null);
-            setCurrentPage(p);
-          }}
+          onChangePage={setCurrentPage}
           meta={meta}
           metaLoading={metaLoading}
           metaError={metaError}
@@ -256,27 +248,16 @@ function AppShell() {
           onSelectReciter={(id) =>
             setSettings((prev) => ({ ...prev, defaultReciterId: id }))
           }
-          fontSize={settings.fontSize}
-          onChangeFontSize={(size) =>
-            setSettings((prev) => ({ ...prev, fontSize: size }))
-          }
+          pageZoom={pageZoom}
+          onChangePageZoom={setPageZoom}
           isDark={isDark}
           onToggleDark={handleToggleDarkQuick}
-          tajweedEnabled={settings.tajweedEnabled}
-          onToggleTajweed={() =>
-            setSettings((prev) => ({
-              ...prev,
-              tajweedEnabled: !prev.tajweedEnabled,
-            }))
-          }
           bookmarks={bookmarks}
           onToggleBookmark={handleToggleBookmark}
           lastRead={lastRead}
           onUpdateLastRead={setLastRead}
           completedPages={khatma.completedPages}
           onTogglePageCompleted={handleTogglePageCompleted}
-          onOpenTafsir={handleOpenTafsirFromAyah}
-          highlightedAyahGlobal={highlightedAyahGlobal}
         />
       )}
 

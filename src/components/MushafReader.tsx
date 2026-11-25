@@ -1,52 +1,40 @@
 import {
   Bookmark,
   BookOpenCheck,
-  Check,
   ChevronLeft,
   ChevronRight,
-  Image as ImageIcon,
   List,
   Loader2,
   Mic,
   Moon,
-  Palette,
   Pause,
   Play,
   RotateCcw,
   Search,
-  Sparkles,
   Sun,
-  Type,
-  Volume2,
   WifiOff,
   X,
+  ZoomIn,
+  ZoomOut,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAudio } from '../context/AudioContext';
+import { getAvailableSurahsForMoshaf, searchQuran } from '../lib/api';
 import {
-  fetchMushafPage,
-  getAvailableSurahsForMoshaf,
-  searchQuran,
-} from '../lib/api';
-import {
-  BASMALA_UTHMANI,
   getRevelationLabel,
+  resolveJuzFromMeta,
   resolvePageFromMeta,
-  stripLeadingBasmala,
   toArabicDigits,
 } from '../lib/arabic';
-import { shareAyahAsImage } from '../lib/shareImage';
+import { fetchAndCacheMushafSvg, preloadMushafSvg } from '../lib/cache';
 import type {
-  Ayah,
   BookmarkItem,
   LastReadPosition,
-  MushafPageData,
   QuranMeta,
   Reciter,
   SearchMatch,
 } from '../types/quran';
 import { ReciterSheet } from './ReciterSheet';
-import { TajweedLegend, TajweedText } from './TajweedText';
 
 interface MushafReaderProps {
   currentPage: number;
@@ -61,23 +49,19 @@ interface MushafReaderProps {
   onRetryReciters: () => void;
   selectedReciterId: number;
   onSelectReciter: (id: number) => void;
-  fontSize: number;
-  onChangeFontSize: (size: number) => void;
+  pageZoom: number;
+  onChangePageZoom: (zoom: number) => void;
   isDark: boolean;
   onToggleDark: () => void;
-  tajweedEnabled: boolean;
-  onToggleTajweed: () => void;
   bookmarks: BookmarkItem[];
   onToggleBookmark: (item: BookmarkItem) => void;
   lastRead: LastReadPosition | null;
   onUpdateLastRead: (pos: LastReadPosition) => void;
   completedPages: number[];
   onTogglePageCompleted: (page: number) => void;
-  onOpenTafsir: (surahNumber: number, ayahNumberInSurah: number) => void;
-  highlightedAyahGlobal?: number | null;
 }
 
-type ModalKind = null | 'index' | 'search' | 'bookmarks' | 'typography';
+type ModalKind = null | 'index' | 'search' | 'bookmarks' | 'zoom';
 
 export function MushafReader({
   currentPage,
@@ -92,34 +76,24 @@ export function MushafReader({
   onRetryReciters,
   selectedReciterId,
   onSelectReciter,
-  fontSize,
-  onChangeFontSize,
+  pageZoom,
+  onChangePageZoom,
   isDark,
   onToggleDark,
-  tajweedEnabled,
-  onToggleTajweed,
   bookmarks,
   onToggleBookmark,
   lastRead,
   onUpdateLastRead,
   completedPages,
   onTogglePageCompleted,
-  onOpenTafsir,
-  highlightedAyahGlobal,
 }: MushafReaderProps) {
-  const {
-    activeTrack,
-    isPlaying,
-    activeAyahGlobalNumber,
-    playSurahFromReciter,
-    playAyahSample,
-    togglePlayPause,
-  } = useAudio();
+  const { activeTrack, isPlaying, playSurahFromReciter, togglePlayPause } = useAudio();
 
-  const [pageData, setPageData] = useState<MushafPageData | null>(null);
+  const [pageSvgUrl, setPageSvgUrl] = useState<string | null>(null);
   const [fromCache, setFromCache] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const currentObjectUrlRef = useRef<string | null>(null);
 
   const [activeModal, setActiveModal] = useState<ModalKind>(null);
   const [indexTab, setIndexTab] = useState<'surah' | 'juz' | 'page'>('surah');
@@ -127,9 +101,6 @@ export function MushafReader({
   const [pageJumpInput, setPageJumpInput] = useState(String(currentPage));
 
   const [reciterSheetOpen, setReciterSheetOpen] = useState(false);
-  const [selectedAyah, setSelectedAyah] = useState<Ayah | null>(null);
-  const [sharingAyah, setSharingAyah] = useState(false);
-  const [shareFeedback, setShareFeedback] = useState<string | null>(null);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchMatch[]>([]);
@@ -137,9 +108,10 @@ export function MushafReader({
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchedOnce, setSearchedOnce] = useState(false);
-  const [jumpHighlightGlobal, setJumpHighlightGlobal] = useState<number | null>(
-    highlightedAyahGlobal ?? null
-  );
+
+  // Swipe / mouse drag state
+  const dragStartRef = useRef<{ x: number; y: number; active: boolean } | null>(null);
+  const [dragOffsetX, setDragOffsetX] = useState(0);
 
   const [isOffline, setIsOffline] = useState(
     typeof navigator !== 'undefined' ? !navigator.onLine : false
@@ -160,99 +132,105 @@ export function MushafReader({
     setPageJumpInput(String(currentPage));
   }, [currentPage]);
 
-  useEffect(() => {
-    if (highlightedAyahGlobal) {
-      setJumpHighlightGlobal(highlightedAyahGlobal);
-    }
-  }, [highlightedAyahGlobal]);
+  // Derive current Surah & Juz from AlQuran Cloud meta page references
+  const pageStartRef = useMemo(() => {
+    return meta?.pages.references?.[currentPage - 1] ?? null;
+  }, [meta, currentPage]);
 
-  const loadPage = useCallback(
-    async (page: number) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await fetchMushafPage(page);
-        setPageData(res.data);
-        setFromCache(res.fromCache);
-        const firstAyah = res.data.ayahs[0];
-        if (firstAyah) {
-          onUpdateLastRead({
-            page: res.data.number,
-            surahNumber: firstAyah.surah?.number ?? 1,
-            surahName: firstAyah.surah?.name ?? '',
-            ayahNumber: firstAyah.numberInSurah,
-            updatedAt: Date.now(),
-          });
-        }
-      } catch (err) {
-        setError(
-          err instanceof Error
-            ? err.message
-            : 'تعذر تحميل صفحة المصحف. تحقق من الاتصال بالإنترنت.'
-        );
-      } finally {
-        setLoading(false);
+  const primarySurah = useMemo(() => {
+    const surahNum = pageStartRef?.surah ?? (currentPage === 1 ? 1 : 2);
+    const ref = meta?.surahs.references.find((s) => s.number === surahNum);
+    return {
+      surahNumber: surahNum,
+      surahName:
+        ref?.name ??
+        (surahNum === 1 ? 'سُورَةُ ٱلْفَاتِحَةِ' : `سورة رقم ${toArabicDigits(surahNum)}`),
+    };
+  }, [meta, pageStartRef, currentPage]);
+
+  const currentJuz = useMemo(() => {
+    if (!pageStartRef || !meta?.juzs.references) return 1;
+    return resolveJuzFromMeta(
+      meta.juzs.references,
+      pageStartRef.surah,
+      pageStartRef.ayah
+    );
+  }, [meta, pageStartRef]);
+
+  const loadPageSvg = useCallback(async (page: number) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetchAndCacheMushafSvg(page);
+      if (currentObjectUrlRef.current) {
+        URL.revokeObjectURL(currentObjectUrlRef.current);
       }
-    },
-    [onUpdateLastRead]
-  );
+      currentObjectUrlRef.current = res.objectUrl;
+      setPageSvgUrl(res.objectUrl);
+      setFromCache(res.fromCache);
+
+      // Background preload adjacent pages (page - 1 and page + 1)
+      void preloadMushafSvg(page - 1);
+      void preloadMushafSvg(page + 1);
+    } catch (err) {
+      setPageSvgUrl(null);
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'تعذر تحميل صفحة المصحف. تحقق من الاتصال بالإنترنت.'
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    void loadPage(currentPage);
-  }, [currentPage, loadPage]);
+    void loadPageSvg(currentPage);
+  }, [currentPage, loadPageSvg]);
+
+  // Cleanup object URL on unmount
+  useEffect(() => {
+    return () => {
+      if (currentObjectUrlRef.current) {
+        URL.revokeObjectURL(currentObjectUrlRef.current);
+        currentObjectUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  // Persist last read position by page
+  useEffect(() => {
+    onUpdateLastRead({
+      page: currentPage,
+      surahNumber: primarySurah.surahNumber,
+      surahName: primarySurah.surahName,
+      ayahNumber: pageStartRef?.ayah ?? 1,
+      updatedAt: Date.now(),
+    });
+  }, [
+    currentPage,
+    primarySurah.surahNumber,
+    primarySurah.surahName,
+    pageStartRef?.ayah,
+    onUpdateLastRead,
+  ]);
 
   const currentReciter = useMemo(
     () => reciters.find((r) => r.id === selectedReciterId) ?? reciters[0] ?? null,
     [reciters, selectedReciterId]
   );
 
-  // Group ayahs on the current page by Surah in order of appearance
-  const surahGroups = useMemo(() => {
-    if (!pageData?.ayahs) return [];
-    const groups: Array<{
-      surahNumber: number;
-      surahName: string;
-      revelationType: string;
-      ayahs: Ayah[];
-    }> = [];
-
-    for (const ayah of pageData.ayahs) {
-      const sNum = ayah.surah?.number ?? 1;
-      const sName = ayah.surah?.name ?? '';
-      const rev = ayah.surah?.revelationType ?? '';
-      const lastGroup = groups[groups.length - 1];
-      if (!lastGroup || lastGroup.surahNumber !== sNum) {
-        groups.push({
-          surahNumber: sNum,
-          surahName: sName,
-          revelationType: rev,
-          ayahs: [ayah],
-        });
-      } else {
-        lastGroup.ayahs.push(ayah);
-      }
-    }
-    return groups;
-  }, [pageData]);
-
-  const primarySurah = surahGroups[0];
-  const currentJuz = pageData?.ayahs[0]?.juz ?? 1;
-
-  const isPageBookmarked = bookmarks.some(
-    (b) => b.type === 'page' && b.page === currentPage
-  );
+  const isPageBookmarked = bookmarks.some((b) => b.page === currentPage && b.type === 'page');
   const isPageCompleted = completedPages.includes(currentPage);
 
   const isPlayingCurrentPageSurah = Boolean(
     activeTrack &&
       activeTrack.kind === 'surah' &&
-      primarySurah &&
       activeTrack.surahNumber === primarySurah.surahNumber &&
       isPlaying
   );
 
   const handlePlayPageSurah = async () => {
-    if (!primarySurah) return;
     if (
       activeTrack &&
       activeTrack.kind === 'surah' &&
@@ -305,32 +283,52 @@ export function MushafReader({
         match.surah.number,
         match.numberInSurah
       );
-    setJumpHighlightGlobal(match.number);
     setActiveModal(null);
     onChangePage(resolvedPage);
   };
 
-  const handleShareAyah = async (ayah: Ayah) => {
-    setSharingAyah(true);
-    setShareFeedback(null);
-    try {
-      const cleanText = stripLeadingBasmala(
-        ayah.text,
-        ayah.surah?.number ?? 1,
-        ayah.numberInSurah
-      );
-      await shareAyahAsImage({
-        ayahText: cleanText,
-        surahName: ayah.surah?.name ?? '',
-        ayahNumber: ayah.numberInSurah,
-        darkMode: isDark,
-      });
-      setShareFeedback('تم حفظ صورة الآية');
-      setTimeout(() => setShareFeedback(null), 2500);
-    } catch {
-      setShareFeedback('تعذر إنشاء الصورة');
-    } finally {
-      setSharingAyah(false);
+  const handlePageJumpSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const num = Number(pageJumpInput);
+    if (Number.isFinite(num) && num >= 1 && num <= 604) {
+      setActiveModal(null);
+      onChangePage(Math.floor(num));
+    }
+  };
+
+  // Pointer swipe / mouse drag handlers (RTL: left = next page, right = prev page)
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 && e.pointerType === 'mouse') return;
+    dragStartRef.current = { x: e.clientX, y: e.clientY, active: true };
+    setDragOffsetX(0);
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragStartRef.current?.active) return;
+    const dx = e.clientX - dragStartRef.current.x;
+    const dy = e.clientY - dragStartRef.current.y;
+    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dx) < 16) {
+      return;
+    }
+    setDragOffsetX(Math.max(-90, Math.min(90, dx * 0.45)));
+  };
+
+  const handlePointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragStartRef.current?.active) return;
+    const dx = e.clientX - dragStartRef.current.x;
+    const dy = e.clientY - dragStartRef.current.y;
+    dragStartRef.current = null;
+    setDragOffsetX(0);
+
+    // Require clear horizontal swipe/drag (>= 55px and mostly horizontal)
+    if (Math.abs(dx) >= 55 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+      if (dx < 0 && currentPage < 604) {
+        // Swipe left in RTL -> Next page
+        onChangePage(currentPage + 1);
+      } else if (dx > 0 && currentPage > 1) {
+        // Swipe right in RTL -> Previous page
+        onChangePage(currentPage - 1);
+      }
     }
   };
 
@@ -361,14 +359,16 @@ export function MushafReader({
           >
             <List className="h-4 w-4 shrink-0" />
             <span className="truncate max-w-[140px] sm:max-w-none">
-              {primarySurah ? primarySurah.surahName : 'الفهرس'}
+              {primarySurah.surahName}
             </span>
           </button>
 
           <div className="hidden sm:flex items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400 whitespace-nowrap">
             <span>الجزء {toArabicDigits(currentJuz)}</span>
             <span aria-hidden="true">·</span>
-            <span className="tabular-nums">صفحة {toArabicDigits(currentPage)}</span>
+            <span className="tabular-nums">
+              صفحة {toArabicDigits(currentPage)} من {toArabicDigits(604)}
+            </span>
           </div>
         </div>
 
@@ -378,7 +378,7 @@ export function MushafReader({
             type="button"
             onClick={handlePlayPageSurah}
             aria-label={isPlayingCurrentPageSurah ? 'إيقاف تلاوة الصفحة' : 'تشغيل تلاوة الصفحة'}
-            title="تشغيل سورة الصفحة"
+            title="تشغيل تلاوة الصفحة"
             className="flex h-11 w-11 items-center justify-center rounded-xl bg-black text-white dark:bg-white dark:text-black transition-transform active:scale-95"
           >
             {isPlayingCurrentPageSurah ? (
@@ -421,11 +421,11 @@ export function MushafReader({
 
           <button
             type="button"
-            onClick={() => setActiveModal('typography')}
-            aria-label="حجم الخط والتجويد"
+            onClick={() => setActiveModal('zoom')}
+            aria-label="تكبير وتصغير عرض الصفحة"
             className="flex h-11 w-11 items-center justify-center rounded-xl border border-neutral-200 text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
           >
-            <Type className="h-4 w-4" />
+            <ZoomIn className="h-4 w-4" />
           </button>
 
           <button
@@ -439,7 +439,7 @@ export function MushafReader({
         </div>
       </header>
 
-      {/* Secondary metadata & quick resume/tajweed/offline bar */}
+      {/* Secondary metadata & offline / bookmark / resume bar */}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
           <span className="sm:hidden tabular-nums">
@@ -457,26 +457,13 @@ export function MushafReader({
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={onToggleTajweed}
-            className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
-              tajweedEnabled
-                ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-                : 'border-neutral-200 text-neutral-600 hover:text-black dark:border-neutral-800 dark:text-neutral-400 dark:hover:text-white'
-            }`}
-          >
-            <Palette className="h-3.5 w-3.5" />
-            <span>التجويد</span>
-          </button>
-
-          <button
-            type="button"
             onClick={() =>
               onToggleBookmark({
                 id: `page:${currentPage}`,
                 type: 'page',
                 page: currentPage,
-                surahNumber: primarySurah?.surahNumber,
-                surahName: primarySurah?.surahName,
+                surahNumber: primarySurah.surahNumber,
+                surahName: primarySurah.surahName,
                 createdAt: Date.now(),
               })
             }
@@ -502,149 +489,75 @@ export function MushafReader({
         </div>
       </div>
 
-      {tajweedEnabled && (
-        <div className="mb-4">
-          <TajweedLegend isDark={isDark} />
-        </div>
-      )}
-
-      {/* Main Mushaf Page Frame */}
-      <main className="mushaf-page-surface rounded-2xl border border-neutral-300 dark:border-neutral-800 p-2 sm:p-3 shadow-xs">
-        <div className="rounded-xl border border-neutral-200 dark:border-neutral-800 px-4 py-5 sm:px-8 sm:py-8 min-h-[58vh]">
-          {loading ? (
-            <div className="flex flex-col items-center justify-center py-24 gap-3 text-sm text-neutral-500 dark:text-neutral-400">
-              <Loader2 className="h-7 w-7 animate-spin text-black dark:text-white" />
-              <span>جارٍ تحميل الصفحة {toArabicDigits(currentPage)}...</span>
-            </div>
-          ) : error ? (
-            <div className="flex flex-col items-center justify-center py-20 gap-4 text-center">
-              <p className="text-sm font-medium text-neutral-700 dark:text-neutral-300 max-w-md">
-                {error}
-              </p>
-              <button
-                type="button"
-                onClick={() => void loadPage(currentPage)}
-                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-black px-5 py-2.5 text-xs font-semibold text-white dark:bg-white dark:text-black"
-              >
-                <RotateCcw className="h-4 w-4" />
-                <span>إعادة المحاولة</span>
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-6">
-              {surahGroups.map((group) => {
-                const startsAtAyahOne = group.ayahs[0]?.numberInSurah === 1;
-                const showBasmala =
-                  startsAtAyahOne && group.surahNumber !== 1 && group.surahNumber !== 9;
-
-                return (
-                  <section key={`${group.surahNumber}-${group.ayahs[0]?.number}`} className="space-y-4">
-                    {/* Surah Banner Header when Surah starts on this page */}
-                    {startsAtAyahOne && (
-                      <div className="rounded-xl border border-neutral-300 dark:border-neutral-700 bg-neutral-100/70 dark:bg-neutral-900/70 px-4 py-3 text-center">
-                        <div className="font-quran text-xl sm:text-2xl font-bold text-black dark:text-white">
-                          {group.surahName}
-                        </div>
-                        <div className="mt-1 text-[11px] text-neutral-500 dark:text-neutral-400">
-                          {getRevelationLabel(group.revelationType)}
-                        </div>
-                      </div>
-                    )}
-
-                    {showBasmala && (
-                      <div className="font-quran text-center text-xl sm:text-2xl text-black dark:text-white py-1">
-                        {BASMALA_UTHMANI}
-                      </div>
-                    )}
-
-                    {/* Flowing Uthmani Mushaf text */}
-                    <div
-                      dir="rtl"
-                      className="font-quran text-justify leading-[2.25] tracking-normal text-black dark:text-white"
-                      style={{ fontSize: `${fontSize}px` }}
-                    >
-                      {group.ayahs.map((ayah) => {
-                        const cleanText = stripLeadingBasmala(
-                          ayah.text,
-                          group.surahNumber,
-                          ayah.numberInSurah
-                        );
-                        const isPlayingThisAyah = activeAyahGlobalNumber === ayah.number;
-                        const isSelectedThis = selectedAyah?.number === ayah.number;
-                        const isJumpMatch = jumpHighlightGlobal === ayah.number;
-                        const isBookmarkedAyah = bookmarks.some(
-                          (b) =>
-                            b.type === 'ayah' &&
-                            b.surahNumber === group.surahNumber &&
-                            b.ayahNumber === ayah.numberInSurah
-                        );
-
-                        return (
-                          <span
-                            key={ayah.number}
-                            role="button"
-                            tabIndex={0}
-                            onClick={() => setSelectedAyah(ayah)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' || e.key === ' ') {
-                                e.preventDefault();
-                                setSelectedAyah(ayah);
-                              }
-                            }}
-                            className={`inline cursor-pointer rounded-md px-0.5 transition-colors ${
-                              isPlayingThisAyah || isSelectedThis
-                                ? 'bg-neutral-200 dark:bg-neutral-800 underline decoration-neutral-500 underline-offset-8'
-                                : isJumpMatch
-                                  ? 'bg-neutral-200/80 dark:bg-neutral-800/80'
-                                  : 'hover:bg-neutral-100 dark:hover:bg-neutral-900'
-                            }`}
-                          >
-                            <TajweedText
-                              text={cleanText}
-                              enabled={tajweedEnabled}
-                              isDark={isDark}
-                            />{' '}
-                            <span
-                              className={`inline-flex items-center text-[0.82em] select-none ${
-                                isBookmarkedAyah ? 'font-bold underline' : ''
-                              }`}
-                            >
-                              ﴿{toArabicDigits(ayah.numberInSurah)}﴾
-                            </span>{' '}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </section>
-                );
-              })}
-
-              {/* Page Footer */}
-              <div className="mt-6 flex flex-wrap items-center justify-between gap-2 border-t border-neutral-200 dark:border-neutral-800 pt-4 text-xs text-neutral-500 dark:text-neutral-400">
-                <span className="tabular-nums">
-                  صفحة {toArabicDigits(currentPage)} من {toArabicDigits(604)}
-                </span>
-
+      {/* Authentic Madani Mushaf SVG Page Canvas (Always Cream Paper, Never Inverted in Dark Mode) */}
+      <main className="w-full overflow-x-auto">
+        <div
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerEnd}
+          onPointerCancel={handlePointerEnd}
+          className="mx-auto select-none touch-pan-y cursor-grab active:cursor-grabbing rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-[#FAF6EC] p-2 sm:p-4 shadow-xs transition-transform duration-150 ease-out"
+          style={{
+            width: `${pageZoom}%`,
+            maxWidth: pageZoom <= 100 ? '640px' : `${Math.round(640 * (pageZoom / 100))}px`,
+            minWidth: '280px',
+            transform: dragOffsetX !== 0 ? `translateX(${dragOffsetX}px)` : undefined,
+          }}
+        >
+          <div className="relative w-full aspect-[510.236/729.448] overflow-hidden rounded-xl bg-[#FAF6EC] flex items-center justify-center">
+            {loading ? (
+              <div className="flex flex-col items-center justify-center gap-3 text-sm text-neutral-700">
+                <Loader2 className="h-7 w-7 animate-spin text-black" />
+                <span>جارٍ تحميل صفحة {toArabicDigits(currentPage)}...</span>
+              </div>
+            ) : error || !pageSvgUrl ? (
+              <div className="flex flex-col items-center justify-center gap-4 px-6 text-center">
+                <p className="text-sm font-medium text-neutral-800 max-w-sm">
+                  {error || 'تعذر تحميل صورة الصفحة'}
+                </p>
                 <button
                   type="button"
-                  onClick={() => onTogglePageCompleted(currentPage)}
-                  className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium transition-colors ${
-                    isPageCompleted
-                      ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-                      : 'border-neutral-300 text-black hover:bg-neutral-100 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-900'
-                  }`}
+                  onClick={() => void loadPageSvg(currentPage)}
+                  className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-black px-5 py-2.5 text-xs font-semibold text-white"
                 >
-                  <BookOpenCheck className="h-3.5 w-3.5" />
-                  <span>{isPageCompleted ? 'تمت قراءة الصفحة' : 'تحديد كمقروءة للختمة'}</span>
+                  <RotateCcw className="h-4 w-4" />
+                  <span>إعادة المحاولة</span>
                 </button>
               </div>
-            </div>
-          )}
+            ) : (
+              <img
+                src={pageSvgUrl}
+                alt={`صفحة ${currentPage} من المصحف المدني`}
+                draggable={false}
+                className="h-full w-full object-contain pointer-events-none"
+              />
+            )}
+          </div>
+
+          {/* Page Footer (always readable neutral on cream paper) */}
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-neutral-300/70 pt-3 text-xs text-neutral-700">
+            <span className="tabular-nums font-medium">
+              صفحة {toArabicDigits(currentPage)} من {toArabicDigits(604)}
+            </span>
+
+            <button
+              type="button"
+              onClick={() => onTogglePageCompleted(currentPage)}
+              className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                isPageCompleted
+                  ? 'border-black bg-black text-white'
+                  : 'border-neutral-400 bg-white/70 text-black hover:bg-white'
+              }`}
+            >
+              <BookOpenCheck className="h-3.5 w-3.5" />
+              <span>{isPageCompleted ? 'تمت قراءة الصفحة' : 'تحديد كمقروءة للختمة'}</span>
+            </button>
+          </div>
         </div>
       </main>
 
-      {/* Bottom Prev / Page Jump / Next Bar */}
-      <div className="mt-4 flex items-center justify-between gap-2">
+      {/* Bottom Prev / Direct Page Jump Input / Next Bar */}
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
         <button
           type="button"
           onClick={() => onChangePage(Math.max(1, currentPage - 1))}
@@ -655,16 +568,26 @@ export function MushafReader({
           <span>الصفحة السابقة</span>
         </button>
 
-        <button
-          type="button"
-          onClick={() => {
-            setIndexTab('page');
-            setActiveModal('index');
-          }}
-          className="min-h-[44px] rounded-xl border border-neutral-200 px-4 py-2 text-xs font-semibold tabular-nums text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
-        >
-          {toArabicDigits(currentPage)} / {toArabicDigits(604)}
-        </button>
+        <form onSubmit={handlePageJumpSubmit} className="flex items-center gap-1.5">
+          <input
+            type="number"
+            aria-label="رقم الصفحة من ١ إلى ٦٠٤"
+            min={1}
+            max={604}
+            value={pageJumpInput}
+            onChange={(e) => setPageJumpInput(e.target.value)}
+            className="h-11 w-16 rounded-xl border border-neutral-200 bg-white px-2 text-center text-xs font-bold tabular-nums text-black focus:border-black focus:outline-none dark:border-neutral-800 dark:bg-black dark:text-white dark:focus:border-white"
+          />
+          <span className="text-xs text-neutral-500 dark:text-neutral-400 tabular-nums">
+            من {toArabicDigits(604)}
+          </span>
+          <button
+            type="submit"
+            className="min-h-[44px] rounded-xl border border-neutral-200 px-3 text-xs font-semibold text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
+          >
+            انتقال
+          </button>
+        </form>
 
         <button
           type="button"
@@ -676,126 +599,6 @@ export function MushafReader({
           <ChevronLeft className="h-4 w-4" />
         </button>
       </div>
-
-      {/* Selected Ayah Action Bottom Sheet */}
-      {selectedAyah && (
-        <div
-          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/55 backdrop-blur-xs"
-          onClick={() => setSelectedAyah(null)}
-        >
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="خيارات الآية"
-            className="w-full max-w-lg rounded-t-3xl sm:rounded-3xl border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-black"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-neutral-300 dark:bg-neutral-700 sm:hidden" />
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-sm font-bold text-black dark:text-white">
-                {selectedAyah.surah?.name} · الآية {toArabicDigits(selectedAyah.numberInSurah)}
-              </div>
-              <button
-                type="button"
-                onClick={() => setSelectedAyah(null)}
-                aria-label="إغلاق"
-                className="flex h-10 w-10 items-center justify-center rounded-full text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <p className="font-quran text-lg leading-loose text-black dark:text-white mb-4 max-h-36 overflow-y-auto border-y border-neutral-200 dark:border-neutral-800 py-3">
-              {stripLeadingBasmala(
-                selectedAyah.text,
-                selectedAyah.surah?.number ?? 1,
-                selectedAyah.numberInSurah
-              )}
-            </p>
-
-            {shareFeedback && (
-              <p className="mb-3 text-center text-xs font-semibold text-black dark:text-white">
-                {shareFeedback}
-              </p>
-            )}
-
-            <div className="grid grid-cols-2 gap-2.5">
-              <button
-                type="button"
-                onClick={() => {
-                  void playAyahSample(selectedAyah, selectedAyah.surah?.name ?? '');
-                }}
-                className="flex min-h-[46px] items-center justify-center gap-2 rounded-xl bg-black px-3 py-2.5 text-xs font-semibold text-white dark:bg-white dark:text-black"
-              >
-                <Volume2 className="h-4 w-4" />
-                <span>استماع للآية (عينة)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const sNum = selectedAyah.surah?.number ?? 1;
-                  const aNum = selectedAyah.numberInSurah;
-                  setSelectedAyah(null);
-                  onOpenTafsir(sNum, aNum);
-                }}
-                className="flex min-h-[46px] items-center justify-center gap-2 rounded-xl border border-neutral-300 px-3 py-2.5 text-xs font-semibold text-black hover:bg-neutral-50 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-950"
-              >
-                <Sparkles className="h-4 w-4" />
-                <span>التفسير</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  const sNum = selectedAyah.surah?.number ?? 1;
-                  onToggleBookmark({
-                    id: `ayah:${sNum}:${selectedAyah.numberInSurah}`,
-                    type: 'ayah',
-                    page: currentPage,
-                    surahNumber: sNum,
-                    surahName: selectedAyah.surah?.name,
-                    ayahNumber: selectedAyah.numberInSurah,
-                    ayahText: stripLeadingBasmala(
-                      selectedAyah.text,
-                      sNum,
-                      selectedAyah.numberInSurah
-                    ),
-                    createdAt: Date.now(),
-                  });
-                }}
-                className="flex min-h-[46px] items-center justify-center gap-2 rounded-xl border border-neutral-300 px-3 py-2.5 text-xs font-semibold text-black hover:bg-neutral-50 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-950"
-              >
-                <Bookmark className="h-4 w-4" />
-                <span>
-                  {bookmarks.some(
-                    (b) =>
-                      b.type === 'ayah' &&
-                      b.surahNumber === (selectedAyah.surah?.number ?? 1) &&
-                      b.ayahNumber === selectedAyah.numberInSurah
-                  )
-                    ? 'إزالة العلامة'
-                    : 'حفظ علامة الآية'}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                disabled={sharingAyah}
-                onClick={() => void handleShareAyah(selectedAyah)}
-                className="flex min-h-[46px] items-center justify-center gap-2 rounded-xl border border-neutral-300 px-3 py-2.5 text-xs font-semibold text-black hover:bg-neutral-50 dark:border-neutral-700 dark:text-white dark:hover:bg-neutral-950 disabled:opacity-50"
-              >
-                {sharingAyah ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <ImageIcon className="h-4 w-4" />
-                )}
-                <span>مشاركة كصورة</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Index Modal: Surahs / Juz / Page */}
       {activeModal === 'index' && (
@@ -822,7 +625,6 @@ export function MushafReader({
               </button>
             </div>
 
-            {/* Segmented tabs */}
             <div className="mb-3 grid grid-cols-3 gap-1 rounded-xl bg-neutral-100 p-1 dark:bg-neutral-900">
               {(['surah', 'juz', 'page'] as const).map((t) => (
                 <button
@@ -943,17 +745,7 @@ export function MushafReader({
                 })}
               </div>
             ) : (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  const num = Number(pageJumpInput);
-                  if (Number.isFinite(num) && num >= 1 && num <= 604) {
-                    setActiveModal(null);
-                    onChangePage(Math.floor(num));
-                  }
-                }}
-                className="space-y-4 py-4"
-              >
+              <form onSubmit={handlePageJumpSubmit} className="space-y-4 py-4">
                 <label className="block text-xs font-medium text-neutral-600 dark:text-neutral-400">
                   أدخل رقم الصفحة (١ إلى ٦٠٤)
                 </label>
@@ -1043,31 +835,40 @@ export function MushafReader({
                     عدد النتائج: {toArabicDigits(searchCount)}
                   </div>
                 )}
-                {searchResults.slice(0, 60).map((match) => (
-                  <button
-                    key={`${match.number}-${match.surah.number}`}
-                    type="button"
-                    onClick={() => handleJumpToMatch(match)}
-                    className="w-full py-3 px-2 text-right hover:bg-neutral-50 dark:hover:bg-neutral-950 rounded-xl"
-                  >
-                    <div className="mb-1 flex items-center justify-between text-xs font-semibold text-neutral-500 dark:text-neutral-400">
-                      <span>
-                        {match.surah.name} · الآية {toArabicDigits(match.numberInSurah)}
-                      </span>
-                      <span>انتقال</span>
-                    </div>
-                    <p className="font-quran text-base leading-relaxed text-black dark:text-white">
-                      {match.text}
-                    </p>
-                  </button>
-                ))}
+                {searchResults.slice(0, 60).map((match) => {
+                  const targetPage =
+                    match.page ??
+                    resolvePageFromMeta(
+                      meta?.pages.references,
+                      match.surah.number,
+                      match.numberInSurah
+                    );
+                  return (
+                    <button
+                      key={`${match.number}-${match.surah.number}`}
+                      type="button"
+                      onClick={() => handleJumpToMatch(match)}
+                      className="w-full py-3 px-2 text-right hover:bg-neutral-50 dark:hover:bg-neutral-950 rounded-xl"
+                    >
+                      <div className="mb-1 flex items-center justify-between text-xs font-semibold text-neutral-500 dark:text-neutral-400">
+                        <span>
+                          {match.surah.name} · الآية {toArabicDigits(match.numberInSurah)}
+                        </span>
+                        <span className="tabular-nums">ص {toArabicDigits(targetPage)}</span>
+                      </div>
+                      <p className="font-quran text-base leading-relaxed text-black dark:text-white">
+                        {match.text}
+                      </p>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
         </div>
       )}
 
-      {/* Bookmarks Modal */}
+      {/* Bookmarks Modal (Page-based) */}
       {activeModal === 'bookmarks' && (
         <div
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs"
@@ -1096,7 +897,7 @@ export function MushafReader({
 
             {bookmarks.length === 0 ? (
               <div className="py-10 text-center text-sm text-neutral-500 dark:text-neutral-400">
-                لا توجد علامات محفوظة بعد. اضغط على أي آية أو زر حفظ الصفحة لإضافتها.
+                لا توجد علامات محفوظة بعد. اضغط على زر حفظ الصفحة لإضافتها.
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto divide-y divide-neutral-200 dark:divide-neutral-800">
@@ -1113,15 +914,11 @@ export function MushafReader({
                       }}
                       className="flex-1 text-right"
                     >
-                      <div className="text-sm font-bold text-black dark:text-white">
-                        {bm.type === 'ayah'
-                          ? `${bm.surahName ?? ''} · الآية ${toArabicDigits(bm.ayahNumber ?? 1)}`
-                          : `صفحة ${toArabicDigits(bm.page)}`}
+                      <div className="text-sm font-bold text-black dark:text-white tabular-nums">
+                        صفحة {toArabicDigits(bm.page)}
                       </div>
                       <div className="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5 line-clamp-1">
-                        {bm.type === 'ayah'
-                          ? bm.ayahText
-                          : `${bm.surahName ?? ''} · صفحة ${toArabicDigits(bm.page)}`}
+                        {bm.surahName ?? 'المصحف المدني'}
                       </div>
                     </button>
                     <button
@@ -1140,8 +937,8 @@ export function MushafReader({
         </div>
       )}
 
-      {/* Typography & Tajweed Quick Settings Modal */}
-      {activeModal === 'typography' && (
+      {/* Page Width Zoom Modal */}
+      {activeModal === 'zoom' && (
         <div
           className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs"
           onClick={() => setActiveModal(null)}
@@ -1149,12 +946,14 @@ export function MushafReader({
           <div
             role="dialog"
             aria-modal="true"
-            aria-label="إعدادات العرض والخط"
+            aria-label="تكبير وتصغير عرض الصفحة"
             className="w-full max-w-md rounded-t-3xl sm:rounded-3xl border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-black"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-base font-bold text-black dark:text-white">إعدادات القراءة</h2>
+              <h2 className="text-base font-bold text-black dark:text-white">
+                حجم عرض صفحة المصحف
+              </h2>
               <button
                 type="button"
                 onClick={() => setActiveModal(null)}
@@ -1165,56 +964,48 @@ export function MushafReader({
               </button>
             </div>
 
-            <div className="space-y-5">
-              <div>
-                <div className="mb-2 flex items-center justify-between text-xs font-semibold">
-                  <span>حجم خط المصحف</span>
-                  <span className="tabular-nums">{toArabicDigits(fontSize)}</span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => onChangeFontSize(Math.max(18, fontSize - 2))}
-                    className="flex h-10 w-12 items-center justify-center rounded-xl border border-neutral-200 text-xs font-bold dark:border-neutral-800"
-                  >
-                    A-
-                  </button>
-                  <input
-                    type="range"
-                    aria-label="حجم الخط"
-                    min={18}
-                    max={38}
-                    step={1}
-                    value={fontSize}
-                    onChange={(e) => onChangeFontSize(Number(e.target.value))}
-                    className="flex-1 accent-black dark:accent-white"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => onChangeFontSize(Math.min(38, fontSize + 2))}
-                    className="flex h-10 w-12 items-center justify-center rounded-xl border border-neutral-200 text-sm font-bold dark:border-neutral-800"
-                  >
-                    A+
-                  </button>
-                </div>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between text-xs font-semibold">
+                <span>العرض</span>
+                <span className="tabular-nums">{toArabicDigits(pageZoom)}%</span>
               </div>
-
-              <button
-                type="button"
-                onClick={onToggleTajweed}
-                className="flex w-full min-h-[48px] items-center justify-between rounded-xl border border-neutral-200 px-4 py-3 text-sm font-semibold dark:border-neutral-800"
-              >
-                <span>تلوين التجويد التقريبي</span>
-                <span
-                  className={`flex h-6 w-6 items-center justify-center rounded-full border ${
-                    tajweedEnabled
-                      ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-                      : 'border-neutral-300 dark:border-neutral-700'
-                  }`}
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  aria-label="تصغير عرض الصفحة"
+                  onClick={() => onChangePageZoom(Math.max(60, pageZoom - 10))}
+                  className="flex h-10 w-12 items-center justify-center rounded-xl border border-neutral-200 text-black dark:border-neutral-800 dark:text-white"
                 >
-                  {tajweedEnabled && <Check className="h-3.5 w-3.5" />}
-                </span>
-              </button>
+                  <ZoomOut className="h-4 w-4" />
+                </button>
+                <input
+                  type="range"
+                  aria-label="نسبة عرض الصفحة"
+                  min={60}
+                  max={130}
+                  step={5}
+                  value={pageZoom}
+                  onChange={(e) => onChangePageZoom(Number(e.target.value))}
+                  className="flex-1 accent-black dark:accent-white"
+                />
+                <button
+                  type="button"
+                  aria-label="تكبير عرض الصفحة"
+                  onClick={() => onChangePageZoom(Math.min(130, pageZoom + 10))}
+                  className="flex h-10 w-12 items-center justify-center rounded-xl border border-neutral-200 text-black dark:border-neutral-800 dark:text-white"
+                >
+                  <ZoomIn className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => onChangePageZoom(100)}
+                  className="text-xs font-semibold text-neutral-500 hover:text-black dark:text-neutral-400 dark:hover:text-white"
+                >
+                  إعادة الضبط (١٠٠٪)
+                </button>
+              </div>
             </div>
           </div>
         </div>

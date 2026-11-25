@@ -10,8 +10,14 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAudio } from '../context/AudioContext';
-import { fetchSurahUthmani, fetchTafsir, TAFSIR_EDITIONS } from '../lib/api';
+import {
+  fetchIbnKathirByAyah,
+  fetchSurahUthmani,
+  fetchTafsir,
+  TAFSIR_EDITIONS,
+} from '../lib/api';
 import { stripLeadingBasmala, toArabicDigits } from '../lib/arabic';
+import { sanitizeTafsirHtml } from '../lib/sanitize';
 import type { MemoStats, QuranMeta, SurahData } from '../types/quran';
 import { TajweedLegend, TajweedText } from './TajweedText';
 
@@ -42,10 +48,18 @@ export function UnderstandingView({
   const [selectedAyahNum, setSelectedAyahNum] = useState<number>(initialAyah || 1);
 
   const [uthmaniData, setUthmaniData] = useState<SurahData | null>(null);
-  const [tafsirData, setTafsirData] = useState<(SurahData & { editionName?: string }) | null>(null);
-  const [tafsirEdition, setTafsirEdition] = useState<string>('ar.muyassar');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [uthmaniLoading, setUthmaniLoading] = useState(true);
+  const [uthmaniError, setUthmaniError] = useState<string | null>(null);
+
+  const [tafsirEdition, setTafsirEdition] = useState<string>('14');
+  const [tafsirContent, setTafsirContent] = useState<{
+    text: string;
+    isHtml: boolean;
+    editionName: string;
+  } | null>(null);
+  const [tafsirLoading, setTafsirLoading] = useState(true);
+  const [tafsirError, setTafsirError] = useState<string | null>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   // Tajweed state
   const [tajweedActive, setTajweedActive] = useState(true);
@@ -64,49 +78,87 @@ export function UnderstandingView({
     }
   }, [initialSurah, initialAyah]);
 
-  const loadSurahAndTafsir = useCallback(async (surahNum: number, editionId: string) => {
-    setLoading(true);
-    setError(null);
+  const totalAyahsInSurah = uthmaniData?.numberOfAyahs ?? 7;
+  const safeAyahNum = Math.max(1, Math.min(totalAyahsInSurah, selectedAyahNum));
+
+  const loadSurah = useCallback(async (surahNum: number) => {
+    setUthmaniLoading(true);
+    setUthmaniError(null);
     try {
-      const [uRes, tRes] = await Promise.all([
-        fetchSurahUthmani(surahNum),
-        fetchTafsir(surahNum, editionId),
-      ]);
+      const uRes = await fetchSurahUthmani(surahNum);
       setUthmaniData(uRes.data);
-      setTafsirData(tRes.data);
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'تعذر تحميل التفسير أو النص القرآني. تحقق من الاتصال.'
+      setUthmaniError(
+        err instanceof Error ? err.message : 'تعذر تحميل النص القرآني للسورة.'
       );
     } finally {
-      setLoading(false);
+      setUthmaniLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void loadSurahAndTafsir(selectedSurah, tafsirEdition);
+    void loadSurah(selectedSurah);
     setRevealedAyahs({});
     setTestedResult({});
     setRangeStart(1);
     setRangeEnd(10);
-  }, [selectedSurah, tafsirEdition, loadSurahAndTafsir]);
+  }, [selectedSurah, loadSurah]);
+
+  const loadCurrentTafsir = useCallback(
+    async (surahNum: number, ayahNum: number, editionId: string) => {
+      setTafsirLoading(true);
+      setTafsirError(null);
+      try {
+        if (editionId === '14') {
+          const res = await fetchIbnKathirByAyah(surahNum, ayahNum);
+          setTafsirContent({
+            text: res.data.text,
+            isHtml: true,
+            editionName: res.data.resourceName || 'تفسير ابن كثير',
+          });
+        } else {
+          const res = await fetchTafsir(surahNum, editionId);
+          const found = res.data.ayahs.find((a) => a.numberInSurah === ayahNum);
+          setTafsirContent({
+            text: found?.text || '',
+            isHtml: false,
+            editionName: res.data.editionName || 'التفسير',
+          });
+        }
+      } catch (err) {
+        setTafsirContent(null);
+        setTafsirError(
+          err instanceof Error
+            ? err.message
+            : 'تعذر تحميل التفسير. تحقق من الاتصال بالإنترنت.'
+        );
+      } finally {
+        setTafsirLoading(false);
+      }
+    },
+    []
+  );
+
+  useEffect(() => {
+    setIsExpanded(false);
+    void loadCurrentTafsir(selectedSurah, safeAyahNum, tafsirEdition);
+  }, [selectedSurah, safeAyahNum, tafsirEdition, loadCurrentTafsir]);
 
   const surahRefs = meta?.surahs.references ?? [];
-  const totalAyahsInSurah = uthmaniData?.numberOfAyahs ?? 7;
-
-  const safeAyahNum = Math.max(1, Math.min(totalAyahsInSurah, selectedAyahNum));
 
   const currentUthmaniAyah = useMemo(
     () => uthmaniData?.ayahs.find((a) => a.numberInSurah === safeAyahNum) ?? null,
     [uthmaniData, safeAyahNum]
   );
 
-  const currentTafsirAyah = useMemo(
-    () => tafsirData?.ayahs.find((a) => a.numberInSurah === safeAyahNum) ?? null,
-    [tafsirData, safeAyahNum]
-  );
+  const sanitizedHtml = useMemo(() => {
+    if (!tafsirContent?.isHtml || !tafsirContent.text) return '';
+    return sanitizeTafsirHtml(tafsirContent.text);
+  }, [tafsirContent]);
+
+  const isLongText = (tafsirContent?.text?.length ?? 0) > 1000;
+  const currentEditionDef = TAFSIR_EDITIONS.find((e) => e.id === tafsirEdition);
+  const currentEditionLabel = currentEditionDef?.label ?? tafsirContent?.editionName ?? 'تفسير ابن كثير';
 
   const memoAyahs = useMemo(() => {
     if (!uthmaniData) return [];
@@ -226,17 +278,17 @@ export function UnderstandingView({
         )}
       </div>
 
-      {loading ? (
+      {uthmaniLoading ? (
         <div className="flex flex-col items-center justify-center py-20 gap-3 text-sm text-neutral-500">
           <Loader2 className="h-7 w-7 animate-spin text-black dark:text-white" />
-          <span>جارٍ تحميل السورة والتفسير...</span>
+          <span>جارٍ تحميل السورة...</span>
         </div>
-      ) : error ? (
+      ) : uthmaniError ? (
         <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
-          <p className="text-sm text-neutral-700 dark:text-neutral-300">{error}</p>
+          <p className="text-sm text-neutral-700 dark:text-neutral-300">{uthmaniError}</p>
           <button
             type="button"
-            onClick={() => void loadSurahAndTafsir(selectedSurah, tafsirEdition)}
+            onClick={() => void loadSurah(selectedSurah)}
             className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-black px-5 py-2.5 text-xs font-semibold text-white dark:bg-white dark:text-black"
           >
             <RotateCcw className="h-4 w-4" />
@@ -275,9 +327,9 @@ export function UnderstandingView({
           )}
 
           <article className="rounded-2xl border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-black p-5 sm:p-6">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-200 dark:border-neutral-800 pb-3">
               <h2 className="text-sm font-bold text-black dark:text-white">
-                التفسير · {tafsirData?.editionName || 'التفسير الميسر'}
+                {currentEditionLabel}
               </h2>
               <select
                 aria-label="اختيار كتاب التفسير"
@@ -292,12 +344,59 @@ export function UnderstandingView({
                 ))}
               </select>
             </div>
-            <p className="mb-3 text-xs text-neutral-500 dark:text-neutral-400">
-              تفسير ابن كثير غير متوفر في واجهة AlQuran Cloud، والتفاسير المعروضة هي المتوفرة فعلياً في الواجهة.
-            </p>
-            <p className="text-sm sm:text-base leading-[1.95] text-neutral-800 dark:text-neutral-200 whitespace-pre-line">
-              {currentTafsirAyah?.text || 'لا يتوفر نص تفسير لهذه الآية.'}
-            </p>
+
+            {tafsirLoading ? (
+              <div className="flex flex-col items-center justify-center py-12 gap-3 text-xs text-neutral-500">
+                <Loader2 className="h-5 w-5 animate-spin text-black dark:text-white" />
+                <span>جارٍ تحميل التفسير...</span>
+              </div>
+            ) : tafsirError ? (
+              <div className="flex flex-col items-center justify-center py-8 gap-3 text-center">
+                <p className="text-xs text-neutral-700 dark:text-neutral-300">{tafsirError}</p>
+                <button
+                  type="button"
+                  onClick={() => void loadCurrentTafsir(selectedSurah, safeAyahNum, tafsirEdition)}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-black px-4 py-2 text-xs font-semibold text-white dark:bg-white dark:text-black"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span>إعادة المحاولة</span>
+                </button>
+              </div>
+            ) : !tafsirContent?.text ? (
+              <p className="text-sm text-neutral-500 dark:text-neutral-400 py-4 text-center">
+                لا يتوفر نص تفسير لهذه الآية.
+              </p>
+            ) : (
+              <div>
+                <div className={`relative ${!isExpanded && isLongText ? 'max-h-96 overflow-hidden' : ''}`}>
+                  {tafsirContent.isHtml ? (
+                    <div
+                      className="text-sm sm:text-base leading-[2] text-neutral-800 dark:text-neutral-200 font-normal [&_p]:mb-3 [&_.blue]:font-bold [&_.blue]:text-black dark:[&_.blue]:text-white [&_.arabic]:font-quran [&_.arabic]:text-lg"
+                      dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
+                    />
+                  ) : (
+                    <p className="text-sm sm:text-base leading-[1.95] text-neutral-800 dark:text-neutral-200 whitespace-pre-line">
+                      {tafsirContent.text}
+                    </p>
+                  )}
+                  {!isExpanded && isLongText && (
+                    <div className="absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-white dark:from-black to-transparent pointer-events-none" />
+                  )}
+                </div>
+
+                {isLongText && (
+                  <div className="mt-4 flex justify-center">
+                    <button
+                      type="button"
+                      onClick={() => setIsExpanded((prev) => !prev)}
+                      className="inline-flex min-h-[40px] items-center gap-2 rounded-xl border border-neutral-300 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-900 px-5 py-2 text-xs font-bold text-black dark:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors"
+                    >
+                      <span>{isExpanded ? 'عرض أقل' : 'عرض المزيد من التفسير'}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </article>
 
           <div className="flex items-center justify-between gap-2 pt-1">

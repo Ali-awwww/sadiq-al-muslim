@@ -253,13 +253,28 @@ export function SettingsView({
         <p className="text-xs leading-relaxed text-neutral-600 dark:text-neutral-400">
           يعتمد التطبيق بشكل كامل على جلب النص القرآني العثماني، والتفسير، والتلاوات
           الصوتية الحية من المصادر الموثوقة التالية دون أي نصوص مخزنة مسبقاً أو
-          مصطنعة. تفسير ابن كثير غير متوفر في واجهة AlQuran Cloud، والتفاسير المعروضة
-          هي المتوفرة فعلياً في الواجهة (الميسر، القرطبي، الجلالين، البغوي، الوسيط).
+          مصطنعة. التفسير الافتراضي هو تفسير ابن كثير من منصة Quran.com، مع إتاحة
+          التفاسير الأخرى (الميسر، القرطبي، الجلالين، البغوي، الوسيط) من AlQuran Cloud.
         </p>
         <ul className="space-y-2 text-xs">
           <li className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 rounded-xl border border-neutral-200 dark:border-neutral-800 p-3">
             <span className="font-semibold text-black dark:text-white">
-              النص العثماني والتفسير والبحث (AlQuran Cloud)
+              تفسير ابن كثير الافتراضي (Quran.com v4)
+            </span>
+            <a
+              href="https://api.quran.com/api/v4/tafsirs/14"
+              target="_blank"
+              rel="noreferrer"
+              dir="ltr"
+              className="inline-flex items-center gap-1 text-neutral-600 hover:text-black dark:text-neutral-400 dark:hover:text-white underline break-all"
+            >
+              <span>https://api.quran.com/api/v4/tafsirs/14</span>
+              <ExternalLink className="h-3 w-3 shrink-0" />
+            </a>
+          </li>
+          <li className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 rounded-xl border border-neutral-200 dark:border-neutral-800 p-3">
+            <span className="font-semibold text-black dark:text-white">
+              النص العثماني والتفاسير الأخرى والبحث (AlQuran Cloud)
             </span>
             <a
               href={ALQURAN_BASE}

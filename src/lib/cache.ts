@@ -2,6 +2,8 @@ const DB_NAME = 'sadiq-al-muslim-db';
 const STORE_NAME = 'kv';
 const DB_VERSION = 1;
 export const AUDIO_CACHE_NAME = 'sadiq-audio-v1';
+export const MUSHAF_SVG_CACHE_NAME = 'sadiq-mushaf-svg-v1';
+export const ALFURQAN_SVG_PAGE_BASE = 'https://alfurqan.online/api/v1/quran-text/page';
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
 
@@ -98,11 +100,15 @@ export async function getCacheStats(): Promise<{
 
   if (typeof caches !== 'undefined') {
     try {
-      const cache = await caches.open(AUDIO_CACHE_NAME);
-      const keys = await cache.keys();
-      audioEntries = keys.length;
+      const audioCache = await caches.open(AUDIO_CACHE_NAME);
+      const audioKeys = await audioCache.keys();
+      audioEntries = audioKeys.length;
+
+      const svgCache = await caches.open(MUSHAF_SVG_CACHE_NAME);
+      const svgKeys = await svgCache.keys();
+      textEntries += svgKeys.length;
     } catch {
-      audioEntries = 0;
+      // ignore
     }
   }
 
@@ -139,9 +145,116 @@ export async function clearAllCaches(): Promise<void> {
   if (typeof caches !== 'undefined') {
     try {
       await caches.delete(AUDIO_CACHE_NAME);
+      await caches.delete(MUSHAF_SVG_CACHE_NAME);
     } catch {
       // ignore
     }
+  }
+}
+
+export function getMushafSvgRemoteUrl(page: number): string {
+  const safePage = Math.max(1, Math.min(604, Math.floor(page)));
+  return `${ALFURQAN_SVG_PAGE_BASE}/${safePage}`;
+}
+
+export async function fetchAndCacheMushafSvg(
+  page: number
+): Promise<{ objectUrl: string; fromCache: boolean }> {
+  const safePage = Math.max(1, Math.min(604, Math.floor(page)));
+  const url = getMushafSvgRemoteUrl(safePage);
+  const idbKey = `mushaf_svg_page_${safePage}`;
+
+  // 1. Check Cache API first
+  if (typeof caches !== 'undefined') {
+    try {
+      const cache = await caches.open(MUSHAF_SVG_CACHE_NAME);
+      const match = await cache.match(url);
+      if (match) {
+        const blob = await match.blob();
+        if (blob.size > 0) {
+          return { objectUrl: URL.createObjectURL(blob), fromCache: true };
+        }
+      }
+    } catch {
+      // fall through
+    }
+  }
+
+  // 2. Check IndexedDB fallback
+  const idbCachedText = await idbGet<string>(idbKey);
+  if (idbCachedText && idbCachedText.includes('<svg')) {
+    const blob = new Blob([idbCachedText], { type: 'image/svg+xml' });
+    return { objectUrl: URL.createObjectURL(blob), fromCache: true };
+  }
+
+  // 3. Fetch live from Al Furqan API
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`تعذر تحميل صفحة المصحف (${res.status})`);
+  }
+  const svgText = await res.text();
+  if (!svgText.includes('<svg')) {
+    throw new Error('استجابة غير صالحة لصفحة المصحف');
+  }
+
+  const svgBlob = new Blob([svgText], { type: 'image/svg+xml' });
+
+  // Store in Cache API
+  if (typeof caches !== 'undefined') {
+    try {
+      const cache = await caches.open(MUSHAF_SVG_CACHE_NAME);
+      await cache.put(
+        url,
+        new Response(svgBlob, {
+          status: 200,
+          headers: { 'Content-Type': 'image/svg+xml' },
+        })
+      );
+    } catch {
+      await idbSet(idbKey, svgText);
+    }
+  } else {
+    await idbSet(idbKey, svgText);
+  }
+
+  return { objectUrl: URL.createObjectURL(svgBlob), fromCache: false };
+}
+
+export async function preloadMushafSvg(page: number): Promise<void> {
+  if (page < 1 || page > 604) return;
+  const url = getMushafSvgRemoteUrl(page);
+  const idbKey = `mushaf_svg_page_${page}`;
+
+  try {
+    if (typeof caches !== 'undefined') {
+      const cache = await caches.open(MUSHAF_SVG_CACHE_NAME);
+      const existing = await cache.match(url);
+      if (existing) return;
+    } else {
+      const existingIdb = await idbGet<string>(idbKey);
+      if (existingIdb) return;
+    }
+
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const svgText = await res.text();
+    if (!svgText.includes('<svg')) return;
+
+    const svgBlob = new Blob([svgText], { type: 'image/svg+xml' });
+    if (typeof caches !== 'undefined') {
+      const cache = await caches.open(MUSHAF_SVG_CACHE_NAME);
+      await cache.put(
+        url,
+        new Response(svgBlob, {
+          status: 200,
+          headers: { 'Content-Type': 'image/svg+xml' },
+        })
+      );
+    } else {
+      await idbSet(idbKey, svgText);
+    }
+  } catch {
+    // Silent background preload failure
   }
 }
 
