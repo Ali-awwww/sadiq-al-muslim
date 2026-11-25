@@ -1,0 +1,137 @@
+name: Bootstrap Android (Capacitor)
+
+# يضيف مشروع Android إلى التطبيق عبر Capacitor، ويولّد الأيقونات،
+# ويضبط التوقيع والأذونات. يُشغَّل يدوياً فقط من تبويب Actions.
+# بعد نجاحه، شغّل android-release.yml لبناء نسخة موقّعة.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Restore misplaced files to their intended paths
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          pairs = {
+              'capacitor.config.ts/capacitor.config.ts': 'capacitor.config.ts',
+              'src/lib/nativeReminders.ts/nativeReminders.ts': 'src/lib/nativeReminders.ts',
+              'assets/icon.svg/icon.svg': 'assets/icon.svg',
+              'assets/splash.svg/splash.svg': 'assets/splash.svg',
+              'public/icon.svg/icon.svg': 'public/icon.svg',
+          }
+          for src, dst in pairs.items():
+              s = Path(src)
+              if s.is_file():
+                  d = Path(dst)
+                  tmp = Path(dst + '.tmp-restore')
+                  shutil.move(str(s), str(tmp))
+                  try:
+                      s.parent.rmdir()
+                  except OSError:
+                      pass
+                  shutil.move(str(tmp), str(d))
+                  print(f'restored {src} -> {dst}')
+          PY
+          ls -l capacitor.config.ts src/lib/nativeReminders.ts assets/icon.svg assets/splash.svg public/icon.svg
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install Capacitor dependencies
+        run: |
+          npm install
+          npm install @capacitor/core@^7 @capacitor/cli@^7 @capacitor/android@^7 @capacitor/local-notifications@^7
+          npm install -D @capacitor/assets@^3
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Add Android project and generate icons
+        run: |
+          npx cap add android
+          npx @capacitor/assets generate --android
+          npx cap sync android
+
+      - name: Show generated Android build file
+        run: cat android/app/build.gradle
+
+      - name: Patch Android project (release signing + notification permissions)
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          bg = Path('android/app/build.gradle')
+          s = bg.read_text()
+          anchor = '    buildTypes {'
+          assert anchor in s, 'buildTypes block not found in build.gradle'
+          signing = (
+              '    def keystoreProperties = new Properties()\n'
+              '    def keystorePropertiesFile = rootProject.file("keystore.properties")\n'
+              '    if (keystorePropertiesFile.exists()) {\n'
+              '        keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\n'
+              '    }\n'
+              '    signingConfigs {\n'
+              '        release {\n'
+              '            if (keystorePropertiesFile.exists()) {\n'
+              "                keyAlias keystoreProperties['keyAlias']\n"
+              "                keyPassword keystoreProperties['keyPassword']\n"
+              "                storeFile rootProject.file(keystoreProperties['storeFile'])\n"
+              "                storePassword keystoreProperties['storePassword']\n"
+              '            }\n'
+              '        }\n'
+              '    }\n'
+          )
+          if 'keystoreProperties' not in s:
+              s = s.replace(anchor, signing + anchor, 1)
+          m = re.search(r'(release \{\n(\s+)minifyEnabled false\n)', s)
+          assert m, 'release buildType block not found in build.gradle'
+          if 'signingConfig signingConfigs.release' not in s:
+              s = s.replace(m.group(1), m.group(1) + '            if (keystorePropertiesFile.exists()) { signingConfig signingConfigs.release }\n', 1)
+          bg.write_text(s)
+          print(bg.read_text())
+          mf = Path('android/app/src/main/AndroidManifest.xml')
+          mtxt = mf.read_text()
+          perms = [
+              '<uses-permission android:name="android.permission.POST_NOTIFICATIONS" />',
+              '<uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />',
+              '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />',
+          ]
+          for perm in perms:
+              if perm not in mtxt:
+                  mtxt = mtxt.replace('<application', perm + '\n    <application', 1)
+          mf.write_text(mtxt)
+          print(mf.read_text())
+          PY
+
+      - name: Verify Android assets
+        run: |
+          test -d android/app/src/main/assets/public
+          test -f android/app/src/main/assets/public/index.html
+          test -f android/app/src/main/AndroidManifest.xml
+          test -f android/app/build.gradle
+          grep -n "POST_NOTIFICATIONS" android/app/src/main/AndroidManifest.xml
+          grep -n "keystoreProperties" android/app/build.gradle
+
+      - name: Commit Android project
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git status --short
+          git diff --cached --quiet || git commit -m "Add Android project via Capacitor (bootstrap)"
+          git push origin main
