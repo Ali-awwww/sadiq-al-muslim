@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { fetchSurahUthmani, getAyahSampleAudioUrl, getSurahAudioUrl } from '../lib/api';
+import { fetchSurahUthmani, getAyahSampleAudio, getSurahAudioUrl } from '../lib/api';
 import { getCachedAudioObjectUrl } from '../lib/cache';
 import type { Ayah, Moshaf, Reciter } from '../types/quran';
 
@@ -176,13 +176,21 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
 
   const playAyahSample = useCallback(
     async (ayah: Ayah, surahName: string) => {
+      let reciterId = 112;
+      try {
+        const stored = JSON.parse(localStorage.getItem('sadiq_settings_v1') || 'null') as { defaultReciterId?: number } | null;
+        if (stored && typeof stored.defaultReciterId === 'number') reciterId = stored.defaultReciterId;
+      } catch {
+        reciterId = 112;
+      }
+      const sample = getAyahSampleAudio(reciterId, ayah.number);
       const track: AudioTrack = {
         id: `sample-${ayah.number}`,
         kind: 'ayah-sample',
         surahNumber: ayah.surah?.number ?? 1,
         surahName,
-        reciterName: 'مشاري العفاسي (عينة)',
-        url: getAyahSampleAudioUrl(ayah.number),
+        reciterName: sample.reciterName,
+        url: sample.url,
         ayahNumberInSurah: ayah.numberInSurah,
         globalAyahNumber: ayah.number,
         isSample: true,

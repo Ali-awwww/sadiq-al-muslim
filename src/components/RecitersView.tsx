@@ -206,33 +206,50 @@ export function RecitersView({
     }
   };
 
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const [currentDownloadSurah, setCurrentDownloadSurah] = useState<string>('');
+
   const handleDownloadAlbum = async () => {
     if (!openReciter || !activeMoshaf) return;
     const targets = allSurahs.filter((s) => availableSurahSet.has(s.number));
     if (targets.length === 0) return;
 
+    abortControllerRef.current = new AbortController();
     cancelAlbumDownloadRef.current = false;
     setAlbumDownloadState({ active: true, done: 0, total: targets.length });
+    setCurrentDownloadSurah('');
 
     let done = 0;
-    for (const s of targets) {
-      if (cancelAlbumDownloadRef.current) break;
-      const url = getSurahAudioUrl(activeMoshaf, s.number);
-      if (!cachedUrls[url]) {
-        const res = await cacheAndDownloadAudio(
-          url,
-          `${openReciter.name} - ${s.name}.mp3`,
-          false
-        );
-        if (res.cached) {
-          setCachedUrls((prev) => ({ ...prev, [url]: true }));
+    try {
+      for (const s of targets) {
+        if (cancelAlbumDownloadRef.current || abortControllerRef.current.signal.aborted) {
+          break;
         }
+        setCurrentDownloadSurah(s.name);
+        const url = getSurahAudioUrl(activeMoshaf, s.number);
+        if (!cachedUrls[url]) {
+          const res = await cacheAndDownloadAudio(
+            url,
+            `${openReciter.name} - ${s.name}.mp3`,
+            false,
+            abortControllerRef.current.signal
+          );
+          if (res.cached) {
+            setCachedUrls((prev) => ({ ...prev, [url]: true }));
+          }
+        }
+        done += 1;
+        setAlbumDownloadState({ active: true, done, total: targets.length });
       }
-      done += 1;
-      setAlbumDownloadState({ active: true, done, total: targets.length });
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        console.error('Download error:', err);
+      }
+    } finally {
+      abortControllerRef.current = null;
+      setAlbumDownloadState((prev) => ({ ...prev, active: false }));
+      setCurrentDownloadSurah('');
     }
-
-    setAlbumDownloadState((prev) => ({ ...prev, active: false }));
   };
 
   if (loading) {
@@ -320,13 +337,20 @@ export function RecitersView({
               type="button"
               onClick={() => {
                 cancelAlbumDownloadRef.current = true;
+                if (abortControllerRef.current) {
+                  abortControllerRef.current.abort();
+                }
               }}
               className="flex min-h-[48px] items-center justify-center gap-2 rounded-2xl border border-black px-4 py-3 text-xs sm:text-sm font-bold text-black dark:border-white dark:text-white"
             >
               <Loader2 className="h-4 w-4 animate-spin" />
               <span className="tabular-nums">
-                جارٍ الحفظ دون اتصال ({toArabicDigits(albumDownloadState.done)} /{' '}
-                {toArabicDigits(albumDownloadState.total)}) · إلغاء
+                {currentDownloadSurah ? `سورة ${currentDownloadSurah} · ` : ''}
+                ({toArabicDigits(albumDownloadState.done)}/{toArabicDigits(albumDownloadState.total)})
+                {albumDownloadState.total > 0
+                  ? ` (${toArabicDigits(Math.round((albumDownloadState.done / albumDownloadState.total) * 100))}%)`
+                  : ''}{' '}
+                · إلغاء
               </span>
             </button>
           ) : (

@@ -115,6 +115,7 @@ export function KhatmaView({
     setReminderNotice(null);
     if (khatma.reminderEnabled) {
       onUpdateKhatma((prev) => ({ ...prev, reminderEnabled: false }));
+      setReminderNotice('تم إيقاف تذكير الورد اليومي.');
       return;
     }
 
@@ -124,19 +125,23 @@ export function KhatmaView({
       return;
     }
 
-    let perm = Notification.permission;
-    if (perm === 'default') {
-      perm = await Notification.requestPermission();
-    }
-    setNotifStatus(perm);
+    try {
+      const perm = await Notification.requestPermission();
+      setNotifStatus(perm);
 
-    if (perm === 'granted') {
-      onUpdateKhatma((prev) => ({ ...prev, reminderEnabled: true }));
-      new Notification('صديق المسلم — تذكير الورد اليومي', {
-        body: `تم تفعيل التذكير اليومي لوردك (${toArabicDigits(khatma.dailyGoalPages)} صفحات).`,
-      });
-    } else {
-      setReminderNotice('يرجى السماح بالإشعارات من إعدادات المتصفح لتفعيل التذكير.');
+      if (perm === 'granted') {
+        onUpdateKhatma((prev) => ({ ...prev, reminderEnabled: true }));
+        setReminderNotice('تم تفعيل التذكير اليومي بنجاح!');
+        new Notification('صديق المسلم — تذكير الورد اليومي', {
+          body: `تم تفعيل التذكير اليومي لوردك (${toArabicDigits(khatma.dailyGoalPages)} صفحات).`,
+        });
+      } else if (perm === 'denied') {
+        setReminderNotice('تم رفض إذن الإشعارات. يرجى السماح بها من إعدادات المتصفح.');
+      } else {
+        setReminderNotice('لم يتم منح إذن الإشعارات.');
+      }
+    } catch {
+      setReminderNotice('تعذر طلب إذن الإشعارات من المتصفح.');
     }
   };
 
@@ -150,9 +155,12 @@ export function KhatmaView({
     });
   };
 
+  const [shareFeedback, setShareFeedback] = useState<string | null>(null);
+
   const handleShareAyahOfDay = async () => {
     if (!ayahOfDay) return;
     setSharing(true);
+    setShareFeedback(null);
     try {
       await shareAyahAsImage({
         ayahText: stripLeadingBasmala(
@@ -164,6 +172,11 @@ export function KhatmaView({
         ayahNumber: ayahOfDay.numberInSurah,
         darkMode: isDark,
       });
+      setShareFeedback('تم تجهيز وتنزيل صورة الآية بنجاح');
+      setTimeout(() => setShareFeedback(null), 3000);
+    } catch {
+      setShareFeedback('تعذر تصدير ومشاركة صورة الآية');
+      setTimeout(() => setShareFeedback(null), 3000);
     } finally {
       setSharing(false);
     }
@@ -241,6 +254,11 @@ export function KhatmaView({
                 <span>مشاركة كصورة</span>
               </button>
             </div>
+            {shareFeedback && (
+              <p className="mt-2 text-xs font-semibold text-black dark:text-white">
+                {shareFeedback}
+              </p>
+            )}
           </>
         ) : null}
       </section>

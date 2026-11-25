@@ -285,13 +285,14 @@ export async function getCachedAudioObjectUrl(url: string): Promise<string | nul
 export async function cacheAndDownloadAudio(
   url: string,
   filename: string,
-  triggerBrowserDownload: boolean
+  triggerBrowserDownload: boolean,
+  signal?: AbortSignal
 ): Promise<{ cached: boolean; downloaded: boolean }> {
   let cached = false;
   let downloaded = false;
 
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { signal });
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -315,16 +316,19 @@ export async function cacheAndDownloadAudio(
       downloaded = true;
     }
     return { cached, downloaded };
-  } catch {
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw err;
+    }
     // Fallback if server blocks CORS for fetch: cache opaque response if possible & trigger anchor download
     if (typeof caches !== 'undefined') {
       try {
-        const opaqueRes = await fetch(url, { mode: 'no-cors' });
+        const opaqueRes = await fetch(url, { mode: 'no-cors', signal });
         const cache = await caches.open(AUDIO_CACHE_NAME);
         await cache.put(url, opaqueRes);
         cached = true;
-      } catch {
-        // ignore
+      } catch (innerErr: any) {
+        if (innerErr?.name === 'AbortError') throw innerErr;
       }
     }
     if (triggerBrowserDownload) {

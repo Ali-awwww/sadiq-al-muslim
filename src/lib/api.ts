@@ -12,8 +12,17 @@ import { idbGet, idbSet } from './cache';
 
 export const ALQURAN_BASE = 'https://api.alquran.cloud/v1';
 export const MP3QURAN_RECITERS_URL = 'https://www.mp3quran.net/api/v3/reciters?language=ar';
-export const ALAFASY_SAMPLE_AUDIO_BASE = 'https://cdn.islamic.network/quran/audio/128/ar.alafasy';
 export const QURAN_COM_TAFSIR_BASE = 'https://api.quran.com/api/v4/tafsirs';
+
+export const AYAH_SAMPLE_AUDIO_BASES: Record<number, { url: string; name: string }> = {
+  112: { url: 'https://cdn.islamic.network/quran/audio/128/ar.minshawi', name: 'محمد صديق المنشاوي' },
+  109: { url: 'https://cdn.islamic.network/quran/audio/128/ar.muhammadayyoub', name: 'محمد أيوب' },
+};
+
+export const DEFAULT_AYAH_SAMPLE_FALLBACK = {
+  url: 'https://cdn.islamic.network/quran/audio/128/ar.minshawi',
+  name: 'محمد صديق المنشاوي',
+};
 
 // Exact 5 reciter IDs specified
 export const ALLOWED_RECITER_IDS = [112, 109, 92, 137, 81] as const;
@@ -325,8 +334,12 @@ export function getSurahAudioUrl(moshaf: Moshaf, surahNumber: number): string {
   return `${server}${padded}.mp3`;
 }
 
-export function getAyahSampleAudioUrl(globalAyahNumber: number): string {
-  return `${ALAFASY_SAMPLE_AUDIO_BASE}/${globalAyahNumber}.mp3`;
+export function getAyahSampleAudio(reciterId: number, globalAyahNumber: number): { url: string; reciterName: string } {
+  const info = AYAH_SAMPLE_AUDIO_BASES[reciterId] || DEFAULT_AYAH_SAMPLE_FALLBACK;
+  return {
+    url: `${info.url}/${globalAyahNumber}.mp3`,
+    reciterName: info.name,
+  };
 }
 
 export function getAvailableSurahsForMoshaf(moshaf?: Moshaf): Set<number> {

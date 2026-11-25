@@ -1,7 +1,7 @@
 import { Check, ExternalLink, Loader2, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import {
-  ALAFASY_SAMPLE_AUDIO_BASE,
+  DEFAULT_AYAH_SAMPLE_FALLBACK,
   ALQURAN_BASE,
   MP3QURAN_RECITERS_URL,
 } from '../lib/api';
@@ -307,7 +307,7 @@ export function SettingsView({
               عينات تلاوة الآيات الفردية (Islamic Network CDN)
             </span>
             <span dir="ltr" className="text-neutral-500 dark:text-neutral-400 break-all">
-              {ALAFASY_SAMPLE_AUDIO_BASE}
+              {DEFAULT_AYAH_SAMPLE_FALLBACK.url}
             </span>
           </li>
         </ul>

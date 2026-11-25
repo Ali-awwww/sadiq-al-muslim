@@ -120,19 +120,40 @@ export async function shareAyahAsImage({
   ctx.fillText(`${cleanSurah} · الآية ${toArabicDigits(ayahNumber)}`, width / 2, refY);
 
   return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => {
+    canvas.toBlob(async (blob) => {
       if (!blob) {
         reject(new Error('فشل تصدير الصورة'));
         return;
       }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `sadiq-ayah-${ayahNumber}.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      const filename = `sadiq-ayah-${ayahNumber}.png`;
+      const file = new File([blob], filename, { type: 'image/png' });
+
+      let shared = false;
+      if (typeof navigator !== 'undefined' && navigator.canShare && navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({
+            title: 'آية من القرآن الكريم',
+            text: `سورة ${surahName} · الآية ${toArabicDigits(ayahNumber)}`,
+            files: [file],
+          });
+          shared = true;
+        } catch (err: any) {
+          if (err?.name !== 'AbortError') {
+            // fall back to download
+          }
+        }
+      }
+
+      if (!shared) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 4000);
+      }
       resolve();
     }, 'image/png');
   });
