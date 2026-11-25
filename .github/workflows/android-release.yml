@@ -11,6 +11,9 @@ name: Android release (signed APK)
 #   KEY_PASSWORD            : كلمة مرور المفتاح
 # تُجهَّز هذه الأسرار مرة واحدة من أثر سير عمل generate-keystore.yml،
 # ولا يُلتزم الـ Keystore ولا كلمات المرور في المستودع أبداً.
+# ملاحظة: لا يمكن استخدام سياق secrets في شروط if في GitHub Actions،
+# لذلك تتحقق خطوتا استعادة الـ Keystore والتحقق من التوقيع من وجود
+# الأسرار داخل السكربت نفسه وتتخطيان العمل بهدوء عند غيابها.
 
 on:
   workflow_dispatch:
@@ -108,12 +111,12 @@ jobs:
           grep -n 'android.intent.category.BROWSABLE' android/app/src/main/AndroidManifest.xml
 
       - name: Restore keystore from secrets
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then echo "ANDROID_KEYSTORE_BASE64 secret is empty; skipping keystore restore."; exit 0; fi
           echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/release.keystore
           cat > android/keystore.properties <<EOF
           keyAlias=upload
@@ -134,10 +137,10 @@ jobs:
 
       - name: Verify APK signature and SHA-256 fingerprint
         id: verify
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
+          if [ -z "$KEYSTORE_PASSWORD" ]; then echo "Keystore secret is empty; skipping signature verification."; exit 0; fi
           APK=android/app/build/outputs/apk/release/app-release.apk
           ls -lh "$APK"
           APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
