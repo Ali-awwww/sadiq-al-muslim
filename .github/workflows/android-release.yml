@@ -157,11 +157,14 @@ jobs:
           if [ -z "$CERT_SHA" ] || [ -z "$KS_SHA" ]; then
             echo "Could not read SHA-256 fingerprint from APK or keystore"; exit 1
           fi
-          if [ "$CERT_SHA" != "$KS_SHA" ]; then
+          CERT_NORM=$(echo "$CERT_SHA" | tr 'a-f' 'A-F' | tr -d ':')
+          KS_NORM=$(echo "$KS_SHA" | tr 'a-f' 'A-F' | tr -d ':')
+          if [ "$CERT_NORM" != "$KS_NORM" ]; then
             echo "SHA-256 mismatch: APK $CERT_SHA != keystore $KS_SHA"; exit 1
           fi
-          echo "SHA-256 fingerprint matches the keystore: $CERT_SHA"
-          echo "sha256=$CERT_SHA" >> "$GITHUB_OUTPUT"
+          CERT_FMT=$(echo "$CERT_NORM" | sed 's/\(..\)/\1:/g; s/:$//')
+          echo "SHA-256 fingerprint matches the keystore: $CERT_FMT"
+          echo "sha256=$CERT_FMT" >> "$GITHUB_OUTPUT"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
