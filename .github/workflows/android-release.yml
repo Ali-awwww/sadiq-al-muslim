@@ -57,7 +57,6 @@ jobs:
           from pathlib import Path
           import shutil
           pairs = {
-              'src/lib/nativeReminders.ts/nativeReminders.ts': 'src/lib/nativeReminders.ts',
               'assets/icon.svg/icon.svg': 'assets/icon.svg',
               'assets/splash.svg/splash.svg': 'assets/splash.svg',
               'public/icon.svg/icon.svg': 'public/icon.svg',
@@ -169,18 +168,18 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sadiq-al-muslim-v1.0-apk
+          name: sadiq-al-muslim-v1.1-apk
           path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
-      - name: Create GitHub release v1.0
+      - name: Create GitHub release v1.1
         if: ${{ inputs.create_release && steps.verify.outputs.sha256 != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
-          name: "صديق المسلم v1.0"
+          name: "صديق المسلم v1.1"
           body: |
-            أول إصدار أندرويد من تطبيق «صديق المسلم».
+الإصدار 1.1 من تطبيق «صديق المسلم» — تحديث جديد.
 
             - مصحف متكامل على الويب: قراءة بالرسم العثماني، تلاوة القراء، تفسير، حفظ، وتتبع الختمة.
             - تذكيرات محلية بإشعارات أندرويد.
