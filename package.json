@@ -6,15 +6,16 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
+    "build:mobile": "npm run build && npx cap sync android",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@capacitor/android": "^7.6.11",
-    "@capacitor/cli": "^7.6.11",
-    "@capacitor/core": "^7.6.11",
-    "@capacitor/local-notifications": "^7.0.7",
+    "@capacitor/android": "^8",
+    "@capacitor/cli": "^8",
+    "@capacitor/core": "^8",
+    "@capacitor/local-notifications": "^8",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^6.1.1",

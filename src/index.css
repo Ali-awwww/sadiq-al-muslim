@@ -43,6 +43,10 @@ html.dark .mushaf-page-surface {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+.pt-safe {
+  padding-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+}
+
 /* Crisp monochrome scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

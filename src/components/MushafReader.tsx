@@ -536,7 +536,7 @@ export function MushafReader({
         onPointerDown={(e) => e.stopPropagation()}
         onPointerUp={(e) => e.stopPropagation()}
         className={
-          'fixed top-0 left-0 right-0 z-30 border-b border-neutral-200 bg-white/95 backdrop-blur-md dark:border-neutral-800 dark:bg-black/95 transition-opacity duration-300 ' +
+          'fixed top-0 left-0 right-0 z-30 pt-safe border-b border-neutral-200 bg-white/95 backdrop-blur-md dark:border-neutral-800 dark:bg-black/95 transition-opacity duration-300 ' +
           (controlsVisible ? 'opacity-100' : 'pointer-events-none opacity-0')
         }
       >
