@@ -16,11 +16,11 @@ export interface MushafLayoutResult {
 }
 
 /**
- * Calculates uniform scale and symmetrical centering offsets to display the Mushaf page
- * edge-to-edge (cover) without aspect-ratio distortion:
- * scale = max(viewport.width / page.width, viewport.height / page.height)
+ * Calculates uniform scale and symmetrical centering offsets to display the entire Mushaf page
+ * inside the viewport (contain) without aspect-ratio distortion or any clipping:
+ * scale = min(viewport.width / page.width, viewport.height / page.height)
  *
- * Excess dimensions extend symmetrically outside the viewport, allowing equal cropping.
+ * Ensures 100% of the page is visible, centered symmetrically on the screen.
  */
 export function calculateMushafScale(
   viewport: Dimensions,
@@ -33,12 +33,12 @@ export function calculateMushafScale(
 
   const scaleX = safeViewportWidth / safePageWidth;
   const scaleY = safeViewportHeight / safePageHeight;
-  const scale = Math.max(scaleX, scaleY);
+  const scale = Math.min(scaleX, scaleY);
 
   const scaledWidth = safePageWidth * scale;
   const scaledHeight = safePageHeight * scale;
 
-  // Symmetrical centering offsets: negative value indicates excess cropped evenly on both sides
+  // Symmetrical centering offsets (margins to center the page within the viewport)
   const offsetX = (safeViewportWidth - scaledWidth) / 2;
   const offsetY = (safeViewportHeight - scaledHeight) / 2;
 
