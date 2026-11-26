@@ -35,6 +35,7 @@ import type {
   SearchMatch,
 } from '../types/quran';
 import { ReciterSheet } from './ReciterSheet';
+import { calculateMushafScale, MUSHAF_PAGE_HEIGHT, MUSHAF_PAGE_WIDTH } from '../lib/mushafLayout';
 
 interface MushafReaderProps {
   currentPage: number;
@@ -109,7 +110,7 @@ export function MushafReader({
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchedOnce, setSearchedOnce] = useState(false);
 
-  // Swipe / mouse drag & horizontal pan state
+  // Viewport & uniform edge-to-edge layout state
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>(() => ({
     width: typeof window !== 'undefined' ? window.innerWidth : 390,
@@ -122,14 +123,38 @@ export function MushafReader({
     x: number;
     y: number;
     t: number;
-    startScrollLeft: number;
     lockedAxis: 'x' | 'y' | null;
     active: boolean;
   } | null>(null);
-  /* Immersive reading: controls hidden by default; tapping the page toggles visibility without auto-hide. */
-  const [isDragging, setIsDragging] = useState(false);
-  const [dragOffsetX, setDragOffsetX] = useState(0);
+
+  // Auto-hide controls: hidden by default, toggled on page tap, auto-hides after ~3s of inactivity
   const [controlsVisible, setControlsVisible] = useState(false);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearHideTimer = useCallback(() => {
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleAutoHide = useCallback(() => {
+    clearHideTimer();
+    if (!activeModal && !reciterSheetOpen) {
+      hideTimerRef.current = setTimeout(() => {
+        setControlsVisible(false);
+      }, 3000);
+    }
+  }, [clearHideTimer, activeModal, reciterSheetOpen]);
+
+  useEffect(() => {
+    if (controlsVisible && !activeModal && !reciterSheetOpen) {
+      scheduleAutoHide();
+    } else {
+      clearHideTimer();
+    }
+    return () => clearHideTimer();
+  }, [controlsVisible, activeModal, reciterSheetOpen, scheduleAutoHide, clearHideTimer]);
 
   useEffect(() => {
     onControlsVisibleChange?.(controlsVisible);
@@ -150,7 +175,7 @@ export function MushafReader({
     };
   }, []);
 
-  // Measure actual available viewport height/width for full-height uniform scaling
+  // Measure actual available viewport height/width for full-screen edge-to-edge uniform scaling
   const measureViewport = useCallback(() => {
     const el = viewportRef.current;
     if (el && el.clientWidth > 0 && el.clientHeight > 0) {
@@ -187,39 +212,17 @@ export function MushafReader({
     };
   }, [measureViewport]);
 
-  // Standard uniform Madani Mushaf SVG dimensions used across all 604 pages
-  const MUSHAF_STD_WIDTH = 510.236;
-  const MUSHAF_STD_HEIGHT = 729.448;
-  const MUSHAF_ASPECT_RATIO = MUSHAF_STD_WIDTH / MUSHAF_STD_HEIGHT;
-
-  const pageHeightPx = Math.max(200, Math.round(viewportSize.height * (pageZoom / 100)));
-  const pageWidthPx = Math.max(200, Math.round(pageHeightPx * MUSHAF_ASPECT_RATIO));
-  const canPanHorizontally = pageWidthPx > viewportSize.width + 2;
-
-  // Reset horizontal scroll to center (or 0 when fitting screen) and clear any drag offset
-  const resetScrollAndDrag = useCallback(() => {
-    dragStartRef.current = null;
-    setIsDragging(false);
-    setDragOffsetX(0);
-    const el = viewportRef.current;
-    if (!el) return;
-    if (!canPanHorizontally) {
-      el.scrollLeft = 0;
-    } else {
-      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
-      el.scrollLeft = Math.round(maxScroll / 2);
-    }
-    el.scrollTop = 0;
-  }, [canPanHorizontally]);
-
-  useLayoutEffect(() => {
-    measureViewport();
-    resetScrollAndDrag();
-    const raf = window.requestAnimationFrame(() => {
-      resetScrollAndDrag();
+  // Uniform scale calculation: scale = max(width / 510.236, height / 729.448)
+  const layout = useMemo(() => {
+    return calculateMushafScale(viewportSize, {
+      width: MUSHAF_PAGE_WIDTH,
+      height: MUSHAF_PAGE_HEIGHT,
     });
-    return () => window.cancelAnimationFrame(raf);
-  }, [currentPage, pageWidthPx, pageHeightPx, viewportSize.width, loading, pageSvgUrl, measureViewport, resetScrollAndDrag]);
+  }, [viewportSize]);
+
+  const zoomFactor = pageZoom / 100;
+  const pageWidthPx = Math.round(layout.scaledWidth * zoomFactor);
+  const pageHeightPx = Math.round(layout.scaledHeight * zoomFactor);
 
   useEffect(() => {
     setPageJumpInput(String(currentPage));
@@ -397,17 +400,13 @@ export function MushafReader({
     } catch {
       // ignore pointer capture unsupported
     }
-    const el = viewportRef.current;
     dragStartRef.current = {
       x: e.clientX,
       y: e.clientY,
       t: Date.now(),
-      startScrollLeft: canPanHorizontally && el ? el.scrollLeft : 0,
       lockedAxis: null,
       active: true,
     };
-    setIsDragging(true);
-    setDragOffsetX(0);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -418,28 +417,6 @@ export function MushafReader({
 
     if (!drag.lockedAxis && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
       drag.lockedAxis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
-    }
-    if (drag.lockedAxis === 'y') {
-      return;
-    }
-
-    const el = viewportRef.current;
-    if (!canPanHorizontally) {
-      // Page fits horizontally: NEVER change scrollLeft, only preview flip drag
-      if (el && el.scrollLeft !== 0) {
-        el.scrollLeft = 0;
-      }
-      setDragOffsetX(Math.max(-80, Math.min(80, dx * 0.35)));
-      return;
-    }
-
-    if (el) {
-      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
-      const targetScroll = drag.startScrollLeft - dx;
-      const clampedScroll = Math.max(0, Math.min(maxScroll, targetScroll));
-      el.scrollLeft = clampedScroll;
-      const edgePull = clampedScroll - targetScroll;
-      setDragOffsetX(edgePull !== 0 ? Math.max(-70, Math.min(70, edgePull * 0.4)) : 0);
     }
   };
 
@@ -458,60 +435,32 @@ export function MushafReader({
     const dy = e.clientY - drag.y;
     const dt = Date.now() - drag.t;
 
-    const el = viewportRef.current;
-    let edgePull = dx;
-    if (canPanHorizontally && el) {
-      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
-      const targetScroll = drag.startScrollLeft - dx;
-      const clampedScroll = Math.max(0, Math.min(maxScroll, targetScroll));
-      edgePull = clampedScroll - targetScroll;
-    }
-
     dragStartRef.current = null;
-    setIsDragging(false);
-    setDragOffsetX(0);
 
-    // Tap toggles immersive controls (stays visible until next tap)
+    // Tap (<10px displacement, <300ms) toggles controls visibility with ~3s auto-hide
     if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && dt < 300) {
-      setControlsVisible((prev) => !prev);
+      setControlsVisible((prev) => {
+        const next = !prev;
+        if (!next) {
+          clearHideTimer();
+        }
+        return next;
+      });
       return;
     }
 
+    // Swipe horizontally flips pages instantly without slide animation
     const isMostlyHorizontal = Math.abs(dx) > Math.abs(dy) * 1.2;
-    let shouldFlip = false;
-    let flipDirection = 0;
-
-    if (!canPanHorizontally) {
-      // Fits screen width -> swipe flips pages directly
-      if (Math.abs(dx) >= 48 && isMostlyHorizontal) {
-        shouldFlip = true;
-        flipDirection = dx;
-      }
-    } else {
-      // Wider than screen -> flip ONLY when pulling past edge OR fast decisive flick
-      const reachedEdgePull = Math.abs(edgePull) >= 48 && isMostlyHorizontal;
-      const isFastClearSwipe =
-        dt < 260 && Math.abs(dx) >= 90 && Math.abs(dx) > Math.abs(dy) * 1.6;
-      if (reachedEdgePull || isFastClearSwipe) {
-        shouldFlip = true;
-        flipDirection = Math.abs(edgePull) >= 48 ? edgePull : dx;
-      }
-    }
-
-    if (shouldFlip) {
+    if (Math.abs(dx) >= 48 && isMostlyHorizontal) {
       const nextPage =
-        flipDirection > 0 && currentPage < 604
+        dx > 0 && currentPage < 604
           ? currentPage + 1
-          : flipDirection < 0 && currentPage > 1
+          : dx < 0 && currentPage > 1
           ? currentPage - 1
           : null;
 
       if (nextPage !== null) {
         onChangePage(nextPage);
-        // Immediately re-center scroll after triggering page change so new page never starts shifted
-        window.requestAnimationFrame(() => {
-          resetScrollAndDrag();
-        });
       }
     }
   };
@@ -532,9 +481,18 @@ export function MushafReader({
     <div className="relative flex-1 min-h-0 w-full h-full bg-[#FAF6EC] overflow-hidden">
       {/* Compact Single-Row Floating Controls Bar (hidden by default; toggled on page tap) */}
       <header
-        onClick={(e) => e.stopPropagation()}
-        onPointerDown={(e) => e.stopPropagation()}
-        onPointerUp={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          scheduleAutoHide();
+        }}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          scheduleAutoHide();
+        }}
+        onPointerUp={(e) => {
+          e.stopPropagation();
+          scheduleAutoHide();
+        }}
         className={
           'fixed top-0 left-0 right-0 z-30 pt-safe border-b border-neutral-200 bg-white/95 backdrop-blur-md dark:border-neutral-800 dark:bg-black/95 transition-opacity duration-300 ' +
           (controlsVisible ? 'opacity-100' : 'pointer-events-none opacity-0')
@@ -739,7 +697,7 @@ export function MushafReader({
         </div>
       </header>
 
-      {/* Authentic Madani Mushaf SVG Page Canvas (Full Available Height, Uniform Scale, Horizontal Pan only when >100% + Swipe) */}
+      {/* Authentic Madani Mushaf SVG Page Canvas: Edge-to-edge uniform scaling with fixed center reference */}
       <main
         ref={viewportRef}
         dir="ltr"
@@ -748,83 +706,71 @@ export function MushafReader({
         onPointerUp={handlePointerEnd}
         onPointerCancel={() => {
           dragStartRef.current = null;
-          setIsDragging(false);
-          setDragOffsetX(0);
         }}
         onLostPointerCapture={() => {
-          if (dragStartRef.current?.active) {
-            dragStartRef.current = null;
-            setIsDragging(false);
-            setDragOffsetX(0);
-          }
+          dragStartRef.current = null;
         }}
-        className={
-          'w-full h-full touch-pan-y select-none cursor-grab active:cursor-grabbing bg-[#FAF6EC] overflow-y-auto ' +
-          (canPanHorizontally ? 'overflow-x-auto' : 'overflow-x-hidden')
-        }
+        className="w-full h-full select-none cursor-grab active:cursor-grabbing bg-[#FAF6EC] overflow-hidden flex items-center justify-center"
       >
         <div
-          className={
-            (canPanHorizontally ? 'w-max ' : 'w-full ') +
-            'min-h-full flex items-center justify-center'
-          }
+          className="relative shrink-0 flex items-center justify-center bg-[#FAF6EC]"
+          style={{
+            width: `${pageWidthPx}px`,
+            height: `${pageHeightPx}px`,
+          }}
         >
-          <div
-            className={
-              'relative shrink-0 bg-[#FAF6EC] flex items-center justify-center ' +
-              (isDragging ? '' : 'transition-transform duration-150 ease-out')
-            }
-            style={{
-              width: `${pageWidthPx}px`,
-              height: `${pageHeightPx}px`,
-              transform: dragOffsetX !== 0 ? `translateX(${dragOffsetX}px)` : undefined,
-            }}
-          >
-            {loading ? (
-              <div
-                dir="rtl"
-                className="flex flex-col items-center justify-center gap-3 text-sm text-neutral-700"
+          {loading && !pageSvgUrl ? (
+            <div
+              dir="rtl"
+              className="flex flex-col items-center justify-center gap-3 text-sm text-neutral-700"
+            >
+              <Loader2 className="h-7 w-7 animate-spin text-black" />
+              <span>جارٍ تحميل صفحة {toArabicDigits(currentPage)}...</span>
+            </div>
+          ) : error && !pageSvgUrl ? (
+            <div
+              dir="rtl"
+              className="flex flex-col items-center justify-center gap-4 px-6 text-center"
+            >
+              <p className="text-sm font-medium text-neutral-800 max-w-sm">
+                {error || 'تعذر تحميل صورة الصفحة'}
+              </p>
+              <button
+                type="button"
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerUp={(e) => e.stopPropagation()}
+                onClick={() => void loadPageSvg(currentPage)}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-black px-5 py-2.5 text-xs font-semibold text-white"
               >
-                <Loader2 className="h-7 w-7 animate-spin text-black" />
-                <span>جارٍ تحميل صفحة {toArabicDigits(currentPage)}...</span>
-              </div>
-            ) : error || !pageSvgUrl ? (
-              <div
-                dir="rtl"
-                className="flex flex-col items-center justify-center gap-4 px-6 text-center"
-              >
-                <p className="text-sm font-medium text-neutral-800 max-w-sm">
-                  {error || 'تعذر تحميل صورة الصفحة'}
-                </p>
-                <button
-                  type="button"
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onPointerUp={(e) => e.stopPropagation()}
-                  onClick={() => void loadPageSvg(currentPage)}
-                  className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-black px-5 py-2.5 text-xs font-semibold text-white"
-                >
-                  <RotateCcw className="h-4 w-4" />
-                  <span>إعادة المحاولة</span>
-                </button>
-              </div>
-            ) : (
-              <img
-                src={pageSvgUrl}
-                alt={`صفحة ${currentPage} من المصحف المدني`}
-                width={pageWidthPx}
-                height={pageHeightPx}
-                draggable={false}
-                onLoad={resetScrollAndDrag}
-                style={{
-                  width: `${pageWidthPx}px`,
-                  height: `${pageHeightPx}px`,
-                  maxWidth: 'none',
-                  maxHeight: 'none',
-                }}
-                className="block object-contain pointer-events-none"
-              />
-            )}
-          </div>
+                <RotateCcw className="h-4 w-4" />
+                <span>إعادة المحاولة</span>
+              </button>
+            </div>
+          ) : (
+            <>
+              {pageSvgUrl && (
+                <img
+                  src={pageSvgUrl}
+                  alt={`صفحة ${currentPage} من المصحف المدني`}
+                  width={pageWidthPx}
+                  height={pageHeightPx}
+                  draggable={false}
+                  style={{
+                    width: `${pageWidthPx}px`,
+                    height: `${pageHeightPx}px`,
+                    maxWidth: 'none',
+                    maxHeight: 'none',
+                  }}
+                  className="block object-contain pointer-events-none select-none"
+                />
+              )}
+              {loading && pageSvgUrl && (
+                <div className="absolute inset-0 flex items-center justify-center bg-[#FAF6EC]/30 pointer-events-none">
+                  <Loader2 className="h-6 w-6 animate-spin text-black/50" />
+                </div>
+              )}
+            </>
+          )}
         </div>
       </main>
 
