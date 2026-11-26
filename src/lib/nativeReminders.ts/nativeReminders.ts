@@ -4,14 +4,14 @@
 // ويجدول إشعاراً يومياً متكرراً في الوقت الذي اختاره المستخدم،
 // أو يلغيه عند تعطيل التذكير. يُستدعى عند كل تشغيل للتطبيق،
 // فيُحدَّث التذكير المجدول كلما غيّر المستخدم الوقت أو فعّله.
-import { Capacitor } from '@capacitor/core';
-import { LocalNotifications } from '@capacitor/local-notifications';
+const getLN = (): any => { const c = (window as any).Capacitor; return c && typeof c.isNativePlatform === 'function' && c.isNativePlatform() ? c.Plugins?.LocalNotifications ?? null : null; };
+// (لا استيراد ثابت لحزم Capacitor هنا — غير مثبّتة في مشروع الويب؛ تُقرأ من window وقت التشغيل فقط).
 
 const NOTIFICATION_ID = 1;
 const STORAGE_KEY = 'sadiq:state:v1';
 
 export async function syncWirdReminderFromStorage(): Promise<void> {
-  if (!Capacitor.isNativePlatform()) return;
+  if (!getLN()) return;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return;
@@ -27,17 +27,17 @@ export async function syncWirdReminderFromStorage(): Promise<void> {
 }
 
 export async function syncWirdReminder(enabled: boolean, time: string): Promise<void> {
-  if (!Capacitor.isNativePlatform()) return;
+  if (!getLN()) return;
   try {
-    const pending = await LocalNotifications.getPending();
+    const pending = await getLN()!.getPending();
     if (pending.notifications.some((n) => n.id === NOTIFICATION_ID)) {
-      await LocalNotifications.cancel({ notifications: [{ id: NOTIFICATION_ID }] });
+      await getLN()!.cancel({ notifications: [{ id: NOTIFICATION_ID }] });
     }
     if (!enabled) return;
     const [hour, minute] = time.split(':').map((v) => Number(v) || 0);
-    const permission = await LocalNotifications.requestPermissions();
+    const permission = await getLN()!.requestPermissions();
     if (permission.display !== 'granted') return;
-    await LocalNotifications.schedule({
+    await getLN()!.schedule({
       notifications: [
         {
           id: NOTIFICATION_ID,

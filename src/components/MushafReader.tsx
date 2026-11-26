@@ -58,7 +58,7 @@ interface MushafReaderProps {
   lastRead: LastReadPosition | null;
   onUpdateLastRead: (pos: LastReadPosition) => void;
   completedPages: number[];
-  onTogglePageCompleted: (page: number) => void;
+  onTogglePageCompleted: (page: number) => void; onControlsVisibleChange?: (visible: boolean) => void;
 }
 
 type ModalKind = null | 'index' | 'search' | 'bookmarks' | 'zoom';
@@ -85,7 +85,7 @@ export function MushafReader({
   lastRead,
   onUpdateLastRead,
   completedPages,
-  onTogglePageCompleted,
+  onTogglePageCompleted, onControlsVisibleChange,
 }: MushafReaderProps) {
   const { activeTrack, isPlaying, playSurahFromReciter, togglePlayPause } = useAudio();
 
@@ -110,8 +110,8 @@ export function MushafReader({
   const [searchedOnce, setSearchedOnce] = useState(false);
 
   // Swipe / mouse drag state
-  const dragStartRef = useRef<{ x: number; y: number; active: boolean } | null>(null);
-  const [dragOffsetX, setDragOffsetX] = useState(0);
+  const dragStartRef = useRef<{ x: number; y: number; t: number; active: boolean } | null>(null);
+  /* Immersive reading: controls hidden by default; a tap on the page shows them for 3s. */ const [dragOffsetX, setDragOffsetX] = useState(0); const [controlsVisible, setControlsVisible] = useState(false); const hideControlsTimerRef = useRef<number | null>(null); const showControlsTemporarily = useCallback(() => { setControlsVisible(true); if (hideControlsTimerRef.current !== null) window.clearTimeout(hideControlsTimerRef.current); hideControlsTimerRef.current = window.setTimeout(() => setControlsVisible(false), 3000); }, []); const hideControlsNow = useCallback(() => { if (hideControlsTimerRef.current !== null) window.clearTimeout(hideControlsTimerRef.current); hideControlsTimerRef.current = null; setControlsVisible(false); }, []); useEffect(() => () => { if (hideControlsTimerRef.current !== null) window.clearTimeout(hideControlsTimerRef.current); }, []); useEffect(() => { onControlsVisibleChange?.(controlsVisible); }, [controlsVisible, onControlsVisibleChange]);
 
   const [isOffline, setIsOffline] = useState(
     typeof navigator !== 'undefined' ? !navigator.onLine : false
@@ -296,10 +296,10 @@ export function MushafReader({
     }
   };
 
-  // Pointer swipe / mouse drag handlers (RTL: left = next page, right = prev page)
+  // Pointer swipe / mouse drag handlers (Arabic RTL book: right = next page, left = prev page)
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
-    dragStartRef.current = { x: e.clientX, y: e.clientY, active: true };
+    dragStartRef.current = { x: e.clientX, y: e.clientY, t: Date.now(), active: true };
     setDragOffsetX(0);
   };
 
@@ -317,16 +317,21 @@ export function MushafReader({
     if (!dragStartRef.current?.active) return;
     const dx = e.clientX - dragStartRef.current.x;
     const dy = e.clientY - dragStartRef.current.y;
+    const dt = Date.now() - (dragStartRef.current?.t ?? Date.now());
     dragStartRef.current = null;
     setDragOffsetX(0);
 
+    if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && dt < 300) {
+      if (controlsVisible) hideControlsNow();
+      else showControlsTemporarily();
+    }
     // Require clear horizontal swipe/drag (>= 55px and mostly horizontal)
     if (Math.abs(dx) >= 55 && Math.abs(dx) > Math.abs(dy) * 1.2) {
-      if (dx < 0 && currentPage < 604) {
-        // Swipe left in RTL -> Next page
+      if (dx > 0 && currentPage < 604) {
+        // Swipe right in Arabic RTL -> Next page
         onChangePage(currentPage + 1);
-      } else if (dx > 0 && currentPage > 1) {
-        // Swipe right in RTL -> Previous page
+      } else if (dx < 0 && currentPage > 1) {
+        // Swipe left in Arabic RTL -> Previous page
         onChangePage(currentPage - 1);
       }
     }
@@ -345,9 +350,9 @@ export function MushafReader({
   }, [meta, surahFilter]);
 
   return (
-    <div className="mx-auto max-w-4xl px-3 sm:px-6 pt-3 pb-6">
+    <div className="w-full">
       {/* Compact iPhone-style Top Navigation Bar */}
-      <header className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-neutral-200 pb-3 dark:border-neutral-800">
+      <header onClick={showControlsTemporarily} className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex flex-wrap items-center justify-between gap-2 border-b border-neutral-200 px-3 pb-3 dark:border-neutral-800'}>
         <div className="flex items-center gap-2 min-w-0">
           <button
             type="button"
@@ -440,7 +445,7 @@ export function MushafReader({
       </header>
 
       {/* Secondary metadata & offline / bookmark / resume bar */}
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
+      <div onClick={showControlsTemporarily} className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex flex-wrap items-center justify-between gap-2 px-3 py-1 text-xs'}>
         <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
           <span className="sm:hidden tabular-nums">
             الجزء {toArabicDigits(currentJuz)} · صفحة {toArabicDigits(currentPage)} من{' '}
@@ -454,7 +459,7 @@ export function MushafReader({
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div onClick={showControlsTemporarily} className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex items-center gap-2 px-3 py-1'}>
           <button
             type="button"
             onClick={() =>
@@ -496,15 +501,15 @@ export function MushafReader({
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerEnd}
           onPointerCancel={handlePointerEnd}
-          className="mx-auto select-none touch-pan-y cursor-grab active:cursor-grabbing rounded-2xl border border-neutral-300 dark:border-neutral-700 bg-[#FAF6EC] p-2 sm:p-4 shadow-xs transition-transform duration-150 ease-out"
+          className="mx-auto select-none touch-pan-y cursor-grab active:cursor-grabbing bg-[#FAF6EC] p-0 transition-transform duration-150 ease-out"
           style={{
             width: `${pageZoom}%`,
-            maxWidth: pageZoom <= 100 ? '640px' : `${Math.round(640 * (pageZoom / 100))}px`,
+            maxWidth: pageZoom <= 100 ? '100%' : `${Math.round(640 * (pageZoom / 100))}px`,
             minWidth: '280px',
             transform: dragOffsetX !== 0 ? `translateX(${dragOffsetX}px)` : undefined,
           }}
         >
-          <div className="relative w-full aspect-[510.236/729.448] overflow-hidden rounded-xl bg-[#FAF6EC] flex items-center justify-center">
+          <div className="relative w-full aspect-[510.236/729.448] overflow-hidden bg-[#FAF6EC] flex items-center justify-center">
             {loading ? (
               <div className="flex flex-col items-center justify-center gap-3 text-sm text-neutral-700">
                 <Loader2 className="h-7 w-7 animate-spin text-black" />
@@ -535,7 +540,12 @@ export function MushafReader({
           </div>
 
           {/* Page Footer (always readable neutral on cream paper) */}
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-neutral-300/70 pt-3 text-xs text-neutral-700">
+          <div
+            onClick={showControlsTemporarily}
+            onPointerDown={(e) => e.stopPropagation()}
+            onPointerUp={(e) => e.stopPropagation()}
+            className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex flex-wrap items-center justify-between gap-2 border-t border-neutral-300/70 px-3 py-2 text-xs text-neutral-700'}
+          >
             <span className="tabular-nums font-medium">
               صفحة {toArabicDigits(currentPage)} من {toArabicDigits(604)}
             </span>
@@ -557,7 +567,10 @@ export function MushafReader({
       </main>
 
       {/* Bottom Prev / Direct Page Jump Input / Next Bar */}
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+      <div
+        onClick={showControlsTemporarily}
+        className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex flex-wrap items-center justify-between gap-2 px-3 py-2'}
+      >
         <button
           type="button"
           onClick={() => onChangePage(Math.max(1, currentPage - 1))}

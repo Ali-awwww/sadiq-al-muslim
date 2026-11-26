@@ -1,7 +1,7 @@
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
-import {syncWirdReminderFromStorage} from './lib/nativeReminders';
+import {syncWirdReminderFromStorage} from './lib/nativeReminders.ts/nativeReminders';
 
 // مزامنة تذكير الورد اليومي (أندرويد فقط؛ لا أثر له في الويب)
 syncWirdReminderFromStorage();

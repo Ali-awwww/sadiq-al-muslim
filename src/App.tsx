@@ -47,6 +47,7 @@ function AppShell() {
   const { activeTrack } = useAudio();
 
   const [activeTab, setActiveTab] = useState<AppTab>('mushaf');
+  const [mushafControlsVisible, setMushafControlsVisible] = useState(false);
   const [settings, setSettings] = useLocalStorage<AppSettings>(
     'sadiq_settings_v1',
     DEFAULT_SETTINGS
@@ -229,7 +230,11 @@ function AppShell() {
     <div
       dir="rtl"
       className={`min-h-screen bg-white text-black dark:bg-black dark:text-white ${
-        activeTrack ? 'pb-36' : 'pb-20'
+        activeTrack
+          ? 'pb-36'
+          : activeTab === 'mushaf' && !mushafControlsVisible
+          ? 'pb-0'
+          : 'pb-20'
       }`}
     >
       {activeTab === 'mushaf' && (
@@ -258,6 +263,7 @@ function AppShell() {
           onUpdateLastRead={setLastRead}
           completedPages={khatma.completedPages}
           onTogglePageCompleted={handleTogglePageCompleted}
+          onControlsVisibleChange={setMushafControlsVisible}
         />
       )}
 
@@ -302,7 +308,9 @@ function AppShell() {
       )}
 
       <MiniPlayer />
-      <BottomTabBar activeTab={activeTab} onSelectTab={setActiveTab} />
+      {(activeTab !== 'mushaf' || mushafControlsVisible) && (
+        <BottomTabBar activeTab={activeTab} onSelectTab={setActiveTab} />
+      )}
     </div>
   );
 }
