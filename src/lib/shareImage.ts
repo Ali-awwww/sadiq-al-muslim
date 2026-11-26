@@ -7,7 +7,7 @@ interface ShareAyahOptions {
   darkMode: boolean;
 }
 
-function wrapArabicLines(
+export function wrapArabicLines(
   ctx: CanvasRenderingContext2D,
   text: string,
   maxWidth: number
