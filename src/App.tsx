@@ -231,13 +231,7 @@ function AppShell() {
       dir="rtl"
       className={`bg-white text-black dark:bg-black dark:text-white ${
         activeTab === 'mushaf'
-          ? `h-screen h-[100dvh] overflow-hidden flex flex-col ${
-              activeTrack
-                ? 'pb-36'
-                : mushafControlsVisible
-                ? 'pb-15'
-                : 'pb-0'
-            }`
+          ? 'h-screen h-[100dvh] overflow-hidden flex flex-col pb-0'
           : `min-h-screen ${activeTrack ? 'pb-36' : 'pb-20'}`
       }`}
     >
