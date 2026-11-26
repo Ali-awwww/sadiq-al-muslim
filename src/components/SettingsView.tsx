@@ -256,6 +256,18 @@ export function SettingsView({
           مصطنعة. التفسير الافتراضي هو تفسير ابن كثير من منصة Quran.com، مع إتاحة
           التفاسير الأخرى (الميسر، القرطبي، الجلالين، البغوي، الوسيط) من AlQuran Cloud.
         </p>
+        <div>
+          <button
+            type="button"
+            onClick={() =>
+              window.open('https://apps-showcase.pages.dev', '_blank', 'noopener,noreferrer')
+            }
+            className="inline-flex min-h-[44px] w-full sm:w-auto items-center justify-center gap-2 rounded-xl bg-black px-5 py-2.5 text-xs font-bold text-white transition-opacity hover:opacity-90 dark:bg-white dark:text-black"
+          >
+            <span>تطبيقاتنا</span>
+            <ExternalLink className="h-4 w-4 shrink-0" />
+          </button>
+        </div>
         <ul className="space-y-2 text-xs">
           <li className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 rounded-xl border border-neutral-200 dark:border-neutral-800 p-3">
             <span className="font-semibold text-black dark:text-white">

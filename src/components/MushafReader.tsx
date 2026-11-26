@@ -17,7 +17,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useAudio } from '../context/AudioContext';
 import { getAvailableSurahsForMoshaf, searchQuran } from '../lib/api';
 import {
@@ -109,9 +109,31 @@ export function MushafReader({
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchedOnce, setSearchedOnce] = useState(false);
 
-  // Swipe / mouse drag state
-  const dragStartRef = useRef<{ x: number; y: number; t: number; active: boolean } | null>(null);
-  /* Immersive reading: controls hidden by default; a tap on the page shows them for 3s. */ const [dragOffsetX, setDragOffsetX] = useState(0); const [controlsVisible, setControlsVisible] = useState(false); const hideControlsTimerRef = useRef<number | null>(null); const showControlsTemporarily = useCallback(() => { setControlsVisible(true); if (hideControlsTimerRef.current !== null) window.clearTimeout(hideControlsTimerRef.current); hideControlsTimerRef.current = window.setTimeout(() => setControlsVisible(false), 3000); }, []); const hideControlsNow = useCallback(() => { if (hideControlsTimerRef.current !== null) window.clearTimeout(hideControlsTimerRef.current); hideControlsTimerRef.current = null; setControlsVisible(false); }, []); useEffect(() => () => { if (hideControlsTimerRef.current !== null) window.clearTimeout(hideControlsTimerRef.current); }, []); useEffect(() => { onControlsVisibleChange?.(controlsVisible); }, [controlsVisible, onControlsVisibleChange]);
+  // Swipe / mouse drag & horizontal pan state
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>(() => ({
+    width: typeof window !== 'undefined' ? window.innerWidth : 390,
+    height:
+      typeof window !== 'undefined'
+        ? (window.visualViewport?.height ?? window.innerHeight)
+        : 844,
+  }));
+  const dragStartRef = useRef<{
+    x: number;
+    y: number;
+    t: number;
+    startScrollLeft: number;
+    lockedAxis: 'x' | 'y' | null;
+    active: boolean;
+  } | null>(null);
+  /* Immersive reading: controls hidden by default; tapping the page toggles visibility without auto-hide. */
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragOffsetX, setDragOffsetX] = useState(0);
+  const [controlsVisible, setControlsVisible] = useState(false);
+
+  useEffect(() => {
+    onControlsVisibleChange?.(controlsVisible);
+  }, [controlsVisible, onControlsVisibleChange]);
 
   const [isOffline, setIsOffline] = useState(
     typeof navigator !== 'undefined' ? !navigator.onLine : false
@@ -127,6 +149,77 @@ export function MushafReader({
       window.removeEventListener('offline', onOffline);
     };
   }, []);
+
+  // Measure actual available viewport height/width for full-height uniform scaling
+  const measureViewport = useCallback(() => {
+    const el = viewportRef.current;
+    if (el && el.clientWidth > 0 && el.clientHeight > 0) {
+      setViewportSize((prev) =>
+        prev.width === el.clientWidth && prev.height === el.clientHeight
+          ? prev
+          : { width: el.clientWidth, height: el.clientHeight }
+      );
+    } else if (typeof window !== 'undefined') {
+      const w = window.innerWidth;
+      const h = Math.round(window.visualViewport?.height ?? window.innerHeight);
+      setViewportSize((prev) =>
+        prev.width === w && prev.height === h ? prev : { width: w, height: h }
+      );
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    measureViewport();
+    const el = viewportRef.current;
+    let observer: ResizeObserver | null = null;
+    if (el && typeof ResizeObserver !== 'undefined') {
+      observer = new ResizeObserver(measureViewport);
+      observer.observe(el);
+    }
+    window.addEventListener('resize', measureViewport);
+    window.addEventListener('orientationchange', measureViewport);
+    window.visualViewport?.addEventListener('resize', measureViewport);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', measureViewport);
+      window.removeEventListener('orientationchange', measureViewport);
+      window.visualViewport?.removeEventListener('resize', measureViewport);
+    };
+  }, [measureViewport]);
+
+  // Standard uniform Madani Mushaf SVG dimensions used across all 604 pages
+  const MUSHAF_STD_WIDTH = 510.236;
+  const MUSHAF_STD_HEIGHT = 729.448;
+  const MUSHAF_ASPECT_RATIO = MUSHAF_STD_WIDTH / MUSHAF_STD_HEIGHT;
+
+  const pageHeightPx = Math.max(200, Math.round(viewportSize.height * (pageZoom / 100)));
+  const pageWidthPx = Math.max(200, Math.round(pageHeightPx * MUSHAF_ASPECT_RATIO));
+  const canPanHorizontally = pageWidthPx > viewportSize.width + 2;
+
+  // Reset horizontal scroll to center (or 0 when fitting screen) and clear any drag offset
+  const resetScrollAndDrag = useCallback(() => {
+    dragStartRef.current = null;
+    setIsDragging(false);
+    setDragOffsetX(0);
+    const el = viewportRef.current;
+    if (!el) return;
+    if (!canPanHorizontally) {
+      el.scrollLeft = 0;
+    } else {
+      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+      el.scrollLeft = Math.round(maxScroll / 2);
+    }
+    el.scrollTop = 0;
+  }, [canPanHorizontally]);
+
+  useLayoutEffect(() => {
+    measureViewport();
+    resetScrollAndDrag();
+    const raf = window.requestAnimationFrame(() => {
+      resetScrollAndDrag();
+    });
+    return () => window.cancelAnimationFrame(raf);
+  }, [currentPage, pageWidthPx, pageHeightPx, viewportSize.width, loading, pageSvgUrl, measureViewport, resetScrollAndDrag]);
 
   useEffect(() => {
     setPageJumpInput(String(currentPage));
@@ -296,43 +389,129 @@ export function MushafReader({
     }
   };
 
-  // Pointer swipe / mouse drag handlers (Arabic RTL book: right = next page, left = prev page)
+  // Pointer pan + swipe / mouse drag handlers (Arabic RTL book: right = next page, left = prev page)
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
-    dragStartRef.current = { x: e.clientX, y: e.clientY, t: Date.now(), active: true };
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // ignore pointer capture unsupported
+    }
+    const el = viewportRef.current;
+    dragStartRef.current = {
+      x: e.clientX,
+      y: e.clientY,
+      t: Date.now(),
+      startScrollLeft: canPanHorizontally && el ? el.scrollLeft : 0,
+      lockedAxis: null,
+      active: true,
+    };
+    setIsDragging(true);
     setDragOffsetX(0);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!dragStartRef.current?.active) return;
-    const dx = e.clientX - dragStartRef.current.x;
-    const dy = e.clientY - dragStartRef.current.y;
-    if (Math.abs(dy) > Math.abs(dx) && Math.abs(dx) < 16) {
+    const drag = dragStartRef.current;
+    if (!drag?.active) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+
+    if (!drag.lockedAxis && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+      drag.lockedAxis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
+    }
+    if (drag.lockedAxis === 'y') {
       return;
     }
-    setDragOffsetX(Math.max(-90, Math.min(90, dx * 0.45)));
+
+    const el = viewportRef.current;
+    if (!canPanHorizontally) {
+      // Page fits horizontally: NEVER change scrollLeft, only preview flip drag
+      if (el && el.scrollLeft !== 0) {
+        el.scrollLeft = 0;
+      }
+      setDragOffsetX(Math.max(-80, Math.min(80, dx * 0.35)));
+      return;
+    }
+
+    if (el) {
+      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+      const targetScroll = drag.startScrollLeft - dx;
+      const clampedScroll = Math.max(0, Math.min(maxScroll, targetScroll));
+      el.scrollLeft = clampedScroll;
+      const edgePull = clampedScroll - targetScroll;
+      setDragOffsetX(edgePull !== 0 ? Math.max(-70, Math.min(70, edgePull * 0.4)) : 0);
+    }
   };
 
   const handlePointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!dragStartRef.current?.active) return;
-    const dx = e.clientX - dragStartRef.current.x;
-    const dy = e.clientY - dragStartRef.current.y;
-    const dt = Date.now() - (dragStartRef.current?.t ?? Date.now());
+    const drag = dragStartRef.current;
+    if (!drag?.active) return;
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // ignore
+    }
+
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    const dt = Date.now() - drag.t;
+
+    const el = viewportRef.current;
+    let edgePull = dx;
+    if (canPanHorizontally && el) {
+      const maxScroll = Math.max(0, el.scrollWidth - el.clientWidth);
+      const targetScroll = drag.startScrollLeft - dx;
+      const clampedScroll = Math.max(0, Math.min(maxScroll, targetScroll));
+      edgePull = clampedScroll - targetScroll;
+    }
+
     dragStartRef.current = null;
+    setIsDragging(false);
     setDragOffsetX(0);
 
+    // Tap toggles immersive controls (stays visible until next tap)
     if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && dt < 300) {
-      if (controlsVisible) hideControlsNow();
-      else showControlsTemporarily();
+      setControlsVisible((prev) => !prev);
+      return;
     }
-    // Require clear horizontal swipe/drag (>= 55px and mostly horizontal)
-    if (Math.abs(dx) >= 55 && Math.abs(dx) > Math.abs(dy) * 1.2) {
-      if (dx > 0 && currentPage < 604) {
-        // Swipe right in Arabic RTL -> Next page
-        onChangePage(currentPage + 1);
-      } else if (dx < 0 && currentPage > 1) {
-        // Swipe left in Arabic RTL -> Previous page
-        onChangePage(currentPage - 1);
+
+    const isMostlyHorizontal = Math.abs(dx) > Math.abs(dy) * 1.2;
+    let shouldFlip = false;
+    let flipDirection = 0;
+
+    if (!canPanHorizontally) {
+      // Fits screen width -> swipe flips pages directly
+      if (Math.abs(dx) >= 48 && isMostlyHorizontal) {
+        shouldFlip = true;
+        flipDirection = dx;
+      }
+    } else {
+      // Wider than screen -> flip ONLY when pulling past edge OR fast decisive flick
+      const reachedEdgePull = Math.abs(edgePull) >= 48 && isMostlyHorizontal;
+      const isFastClearSwipe =
+        dt < 260 && Math.abs(dx) >= 90 && Math.abs(dx) > Math.abs(dy) * 1.6;
+      if (reachedEdgePull || isFastClearSwipe) {
+        shouldFlip = true;
+        flipDirection = Math.abs(edgePull) >= 48 ? edgePull : dx;
+      }
+    }
+
+    if (shouldFlip) {
+      const nextPage =
+        flipDirection > 0 && currentPage < 604
+          ? currentPage + 1
+          : flipDirection < 0 && currentPage > 1
+          ? currentPage - 1
+          : null;
+
+      if (nextPage !== null) {
+        onChangePage(nextPage);
+        // Immediately re-center scroll after triggering page change so new page never starts shifted
+        window.requestAnimationFrame(() => {
+          resetScrollAndDrag();
+        });
       }
     }
   };
@@ -350,41 +529,87 @@ export function MushafReader({
   }, [meta, surahFilter]);
 
   return (
-    <div className="w-full">
-      {/* Compact iPhone-style Top Navigation Bar */}
-      <header onClick={showControlsTemporarily} className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex flex-wrap items-center justify-between gap-2 border-b border-neutral-200 px-3 pb-3 dark:border-neutral-800'}>
-        <div className="flex items-center gap-2 min-w-0">
+    <div className="relative flex-1 min-h-0 w-full h-full bg-[#FAF6EC] overflow-hidden">
+      {/* Compact Single-Row Floating Controls Bar (hidden by default; toggled on page tap) */}
+      <header
+        onClick={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        onPointerUp={(e) => e.stopPropagation()}
+        className={
+          'fixed top-0 left-0 right-0 z-30 border-b border-neutral-200 bg-white/95 backdrop-blur-md dark:border-neutral-800 dark:bg-black/95 transition-opacity duration-300 ' +
+          (controlsVisible ? 'opacity-100' : 'pointer-events-none opacity-0')
+        }
+      >
+        <div className="mx-auto flex max-w-full flex-nowrap items-center gap-1.5 overflow-x-auto px-2 py-1.5">
+          {/* Index (Surah / Juz / Page) */}
           <button
             type="button"
             onClick={() => {
               setIndexTab('surah');
               setActiveModal('index');
             }}
-            className="flex min-h-[44px] items-center gap-2 rounded-xl border border-neutral-200 px-3 py-2 text-xs sm:text-sm font-bold text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
+            className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-neutral-200 px-2.5 text-xs font-bold text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
           >
             <List className="h-4 w-4 shrink-0" />
-            <span className="truncate max-w-[140px] sm:max-w-none">
-              {primarySurah.surahName}
+            <span>{primarySurah.surahName}</span>
+            <span className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400 tabular-nums">
+              · ج{toArabicDigits(currentJuz)}
             </span>
           </button>
 
-          <div className="hidden sm:flex items-center gap-1.5 text-xs text-neutral-500 dark:text-neutral-400 whitespace-nowrap">
-            <span>الجزء {toArabicDigits(currentJuz)}</span>
-            <span aria-hidden="true">·</span>
-            <span className="tabular-nums">
-              صفحة {toArabicDigits(currentPage)} من {toArabicDigits(604)}
-            </span>
-          </div>
-        </div>
+          {/* Prev Page */}
+          <button
+            type="button"
+            onClick={() => onChangePage(Math.max(1, currentPage - 1))}
+            disabled={currentPage <= 1}
+            aria-label="الصفحة السابقة"
+            className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-semibold text-black disabled:opacity-35 hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
+          >
+            <ChevronRight className="h-4 w-4 shrink-0" />
+            <span>السابقة</span>
+          </button>
 
-        {/* Utility buttons */}
-        <div className="flex items-center gap-1 shrink-0">
+          {/* Direct Page Jump */}
+          <form onSubmit={handlePageJumpSubmit} className="flex shrink-0 items-center gap-1">
+            <input
+              type="number"
+              aria-label="رقم الصفحة من ١ إلى ٦٠٤"
+              min={1}
+              max={604}
+              value={pageJumpInput}
+              onChange={(e) => setPageJumpInput(e.target.value)}
+              className="h-10 w-14 rounded-xl border border-neutral-200 bg-white px-1.5 text-center text-xs font-bold tabular-nums text-black focus:border-black focus:outline-none dark:border-neutral-800 dark:bg-black dark:text-white dark:focus:border-white"
+            />
+            <span className="text-[11px] text-neutral-500 dark:text-neutral-400 tabular-nums whitespace-nowrap">
+              /{toArabicDigits(604)}
+            </span>
+            <button
+              type="submit"
+              className="h-10 rounded-xl border border-neutral-200 px-2.5 text-xs font-semibold text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
+            >
+              انتقال
+            </button>
+          </form>
+
+          {/* Next Page */}
+          <button
+            type="button"
+            onClick={() => onChangePage(Math.min(604, currentPage + 1))}
+            disabled={currentPage >= 604}
+            aria-label="الصفحة التالية"
+            className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-semibold text-black disabled:opacity-35 hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
+          >
+            <span>التالية</span>
+            <ChevronLeft className="h-4 w-4 shrink-0" />
+          </button>
+
+          {/* Play / Pause Surah Audio */}
           <button
             type="button"
             onClick={handlePlayPageSurah}
             aria-label={isPlayingCurrentPageSurah ? 'إيقاف تلاوة الصفحة' : 'تشغيل تلاوة الصفحة'}
             title="تشغيل تلاوة الصفحة"
-            className="flex h-11 w-11 items-center justify-center rounded-xl bg-black text-white dark:bg-white dark:text-black transition-transform active:scale-95"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-black text-white dark:bg-white dark:text-black transition-transform active:scale-95"
           >
             {isPlayingCurrentPageSurah ? (
               <Pause className="h-4 w-4" />
@@ -393,73 +618,21 @@ export function MushafReader({
             )}
           </button>
 
+          {/* Reciter Picker */}
           <button
             type="button"
             onClick={() => setReciterSheetOpen(true)}
             aria-label="اختيار القارئ"
             title="اختيار القارئ"
-            className="flex h-11 items-center gap-1.5 rounded-xl border border-neutral-200 px-2.5 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
+            className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-neutral-200 px-2.5 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
           >
             <Mic className="h-4 w-4 shrink-0" />
-            <span className="hidden md:inline max-w-[110px] truncate">
+            <span className="max-w-[100px] truncate">
               {currentReciter ? currentReciter.name : 'القارئ'}
             </span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => setActiveModal('search')}
-            aria-label="بحث في القرآن"
-            className="flex h-11 w-11 items-center justify-center rounded-xl border border-neutral-200 text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
-          >
-            <Search className="h-4 w-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveModal('bookmarks')}
-            aria-label="العلامات المرجعية"
-            className="relative flex h-11 w-11 items-center justify-center rounded-xl border border-neutral-200 text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
-          >
-            <Bookmark className="h-4 w-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveModal('zoom')}
-            aria-label="تكبير وتصغير عرض الصفحة"
-            className="flex h-11 w-11 items-center justify-center rounded-xl border border-neutral-200 text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
-          >
-            <ZoomIn className="h-4 w-4" />
-          </button>
-
-          <button
-            type="button"
-            onClick={onToggleDark}
-            aria-label={isDark ? 'الوضع الفاتح' : 'الوضع الليلي'}
-            className="flex h-11 w-11 items-center justify-center rounded-xl border border-neutral-200 text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
-          >
-            {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
-        </div>
-      </header>
-
-      {/* Secondary metadata & offline / bookmark / resume bar */}
-      <div onClick={showControlsTemporarily} className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex flex-wrap items-center justify-between gap-2 px-3 py-1 text-xs'}>
-        <div className="flex items-center gap-2 text-neutral-500 dark:text-neutral-400">
-          <span className="sm:hidden tabular-nums">
-            الجزء {toArabicDigits(currentJuz)} · صفحة {toArabicDigits(currentPage)} من{' '}
-            {toArabicDigits(604)}
-          </span>
-          {(fromCache || isOffline) && (
-            <span className="inline-flex items-center gap-1 font-medium text-black dark:text-white">
-              <WifiOff className="h-3.5 w-3.5" />
-              <span>{isOffline ? 'وضع عدم الاتصال' : 'محفوظ دون اتصال'}</span>
-            </span>
-          )}
-        </div>
-
-        <div onClick={showControlsTemporarily} className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex items-center gap-2 px-3 py-1'}>
+          {/* Bookmark Current Page */}
           <button
             type="button"
             onClick={() =>
@@ -472,56 +645,161 @@ export function MushafReader({
                 createdAt: Date.now(),
               })
             }
-            className={`inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
-              isPageBookmarked
+            className={
+              'flex h-10 shrink-0 items-center gap-1 rounded-xl border px-2.5 text-xs font-medium transition-colors whitespace-nowrap ' +
+              (isPageBookmarked
                 ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-                : 'border-neutral-200 text-neutral-600 hover:text-black dark:border-neutral-800 dark:text-neutral-400 dark:hover:text-white'
-            }`}
+                : 'border-neutral-200 text-neutral-700 hover:text-black dark:border-neutral-800 dark:text-neutral-300 dark:hover:text-white')
+            }
           >
-            <Bookmark className="h-3.5 w-3.5" fill={isPageBookmarked ? 'currentColor' : 'none'} />
-            <span>{isPageBookmarked ? 'صفحة محفوظة' : 'حفظ الصفحة'}</span>
+            <Bookmark className="h-3.5 w-3.5 shrink-0" fill={isPageBookmarked ? 'currentColor' : 'none'} />
+            <span>{isPageBookmarked ? 'محفوظة' : 'حفظ الصفحة'}</span>
           </button>
 
+          {/* Mark Page Completed for Khatma */}
+          <button
+            type="button"
+            onClick={() => onTogglePageCompleted(currentPage)}
+            aria-label="تحديد كمقروءة للختمة"
+            className={
+              'flex h-10 shrink-0 items-center gap-1 rounded-xl border px-2.5 text-xs font-semibold transition-colors whitespace-nowrap ' +
+              (isPageCompleted
+                ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
+                : 'border-neutral-200 text-neutral-700 hover:text-black dark:border-neutral-800 dark:text-neutral-300 dark:hover:text-white')
+            }
+          >
+            <BookOpenCheck className="h-3.5 w-3.5 shrink-0" />
+            <span>{isPageCompleted ? 'تمت قراءة الصفحة' : 'تحديد كمقروءة'}</span>
+          </button>
+
+          {/* Resume Last Read */}
           {lastRead && lastRead.page !== currentPage && (
             <button
               type="button"
               onClick={() => onChangePage(lastRead.page)}
-              className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-neutral-200 px-2.5 py-1 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
+              className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
             >
               <span>متابعة (ص {toArabicDigits(lastRead.page)})</span>
             </button>
           )}
-        </div>
-      </div>
 
-      {/* Authentic Madani Mushaf SVG Page Canvas (Always Cream Paper, Never Inverted in Dark Mode) */}
-      <main className="w-full overflow-x-auto">
+          {/* Search Quran */}
+          <button
+            type="button"
+            onClick={() => setActiveModal('search')}
+            aria-label="بحث في القرآن"
+            title="بحث في القرآن"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-neutral-200 text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
+          >
+            <Search className="h-4 w-4" />
+          </button>
+
+          {/* Bookmarks List */}
+          <button
+            type="button"
+            onClick={() => setActiveModal('bookmarks')}
+            aria-label="العلامات المرجعية"
+            title="العلامات المرجعية"
+            className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
+          >
+            <Bookmark className="h-4 w-4 shrink-0" />
+            <span>العلامات</span>
+          </button>
+
+          {/* Zoom */}
+          <button
+            type="button"
+            onClick={() => setActiveModal('zoom')}
+            aria-label="تكبير وتصغير عرض الصفحة"
+            title="تكبير وتصغير عرض الصفحة"
+            className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
+          >
+            <ZoomIn className="h-4 w-4 shrink-0" />
+            <span className="tabular-nums">{toArabicDigits(pageZoom)}%</span>
+          </button>
+
+          {/* Dark Mode Toggle */}
+          <button
+            type="button"
+            onClick={onToggleDark}
+            aria-label={isDark ? 'الوضع الفاتح' : 'الوضع الليلي'}
+            title={isDark ? 'الوضع الفاتح' : 'الوضع الليلي'}
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-neutral-200 text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
+          >
+            {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </button>
+
+          {/* Offline / Cached Indicator */}
+          {(fromCache || isOffline) && (
+            <span className="inline-flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-[11px] font-medium text-black dark:border-neutral-800 dark:text-white whitespace-nowrap">
+              <WifiOff className="h-3.5 w-3.5 shrink-0" />
+              <span>{isOffline ? 'دون اتصال' : 'محفوظ'}</span>
+            </span>
+          )}
+        </div>
+      </header>
+
+      {/* Authentic Madani Mushaf SVG Page Canvas (Full Available Height, Uniform Scale, Horizontal Pan only when >100% + Swipe) */}
+      <main
+        ref={viewportRef}
+        dir="ltr"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerEnd}
+        onPointerCancel={() => {
+          dragStartRef.current = null;
+          setIsDragging(false);
+          setDragOffsetX(0);
+        }}
+        onLostPointerCapture={() => {
+          if (dragStartRef.current?.active) {
+            dragStartRef.current = null;
+            setIsDragging(false);
+            setDragOffsetX(0);
+          }
+        }}
+        className={
+          'w-full h-full touch-pan-y select-none cursor-grab active:cursor-grabbing bg-[#FAF6EC] overflow-y-auto ' +
+          (canPanHorizontally ? 'overflow-x-auto' : 'overflow-x-hidden')
+        }
+      >
         <div
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerEnd}
-          onPointerCancel={handlePointerEnd}
-          className="mx-auto select-none touch-pan-y cursor-grab active:cursor-grabbing bg-[#FAF6EC] p-0 transition-transform duration-150 ease-out"
-          style={{
-            width: `${pageZoom}%`,
-            maxWidth: pageZoom <= 100 ? '100%' : `${Math.round(640 * (pageZoom / 100))}px`,
-            minWidth: '280px',
-            transform: dragOffsetX !== 0 ? `translateX(${dragOffsetX}px)` : undefined,
-          }}
+          className={
+            (canPanHorizontally ? 'w-max ' : 'w-full ') +
+            'min-h-full flex items-center justify-center'
+          }
         >
-          <div className="relative w-full aspect-[510.236/729.448] overflow-hidden bg-[#FAF6EC] flex items-center justify-center">
+          <div
+            className={
+              'relative shrink-0 bg-[#FAF6EC] flex items-center justify-center ' +
+              (isDragging ? '' : 'transition-transform duration-150 ease-out')
+            }
+            style={{
+              width: `${pageWidthPx}px`,
+              height: `${pageHeightPx}px`,
+              transform: dragOffsetX !== 0 ? `translateX(${dragOffsetX}px)` : undefined,
+            }}
+          >
             {loading ? (
-              <div className="flex flex-col items-center justify-center gap-3 text-sm text-neutral-700">
+              <div
+                dir="rtl"
+                className="flex flex-col items-center justify-center gap-3 text-sm text-neutral-700"
+              >
                 <Loader2 className="h-7 w-7 animate-spin text-black" />
                 <span>جارٍ تحميل صفحة {toArabicDigits(currentPage)}...</span>
               </div>
             ) : error || !pageSvgUrl ? (
-              <div className="flex flex-col items-center justify-center gap-4 px-6 text-center">
+              <div
+                dir="rtl"
+                className="flex flex-col items-center justify-center gap-4 px-6 text-center"
+              >
                 <p className="text-sm font-medium text-neutral-800 max-w-sm">
                   {error || 'تعذر تحميل صورة الصفحة'}
                 </p>
                 <button
                   type="button"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onPointerUp={(e) => e.stopPropagation()}
                   onClick={() => void loadPageSvg(currentPage)}
                   className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-black px-5 py-2.5 text-xs font-semibold text-white"
                 >
@@ -533,85 +811,22 @@ export function MushafReader({
               <img
                 src={pageSvgUrl}
                 alt={`صفحة ${currentPage} من المصحف المدني`}
+                width={pageWidthPx}
+                height={pageHeightPx}
                 draggable={false}
-                className="h-full w-full object-contain pointer-events-none"
+                onLoad={resetScrollAndDrag}
+                style={{
+                  width: `${pageWidthPx}px`,
+                  height: `${pageHeightPx}px`,
+                  maxWidth: 'none',
+                  maxHeight: 'none',
+                }}
+                className="block object-contain pointer-events-none"
               />
             )}
           </div>
-
-          {/* Page Footer (always readable neutral on cream paper) */}
-          <div
-            onClick={showControlsTemporarily}
-            onPointerDown={(e) => e.stopPropagation()}
-            onPointerUp={(e) => e.stopPropagation()}
-            className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex flex-wrap items-center justify-between gap-2 border-t border-neutral-300/70 px-3 py-2 text-xs text-neutral-700'}
-          >
-            <span className="tabular-nums font-medium">
-              صفحة {toArabicDigits(currentPage)} من {toArabicDigits(604)}
-            </span>
-
-            <button
-              type="button"
-              onClick={() => onTogglePageCompleted(currentPage)}
-              className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-colors ${
-                isPageCompleted
-                  ? 'border-black bg-black text-white'
-                  : 'border-neutral-400 bg-white/70 text-black hover:bg-white'
-              }`}
-            >
-              <BookOpenCheck className="h-3.5 w-3.5" />
-              <span>{isPageCompleted ? 'تمت قراءة الصفحة' : 'تحديد كمقروءة للختمة'}</span>
-            </button>
-          </div>
         </div>
       </main>
-
-      {/* Bottom Prev / Direct Page Jump Input / Next Bar */}
-      <div
-        onClick={showControlsTemporarily}
-        className={'transition-all duration-300 ' + (controlsVisible ? 'opacity-100' : 'pointer-events-none max-h-0 overflow-hidden opacity-0') + ' flex flex-wrap items-center justify-between gap-2 px-3 py-2'}
-      >
-        <button
-          type="button"
-          onClick={() => onChangePage(Math.max(1, currentPage - 1))}
-          disabled={currentPage <= 1}
-          className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-neutral-200 bg-white px-4 py-2 text-xs font-semibold text-black disabled:opacity-35 hover:bg-neutral-50 dark:border-neutral-800 dark:bg-black dark:text-white dark:hover:bg-neutral-950"
-        >
-          <ChevronRight className="h-4 w-4" />
-          <span>الصفحة السابقة</span>
-        </button>
-
-        <form onSubmit={handlePageJumpSubmit} className="flex items-center gap-1.5">
-          <input
-            type="number"
-            aria-label="رقم الصفحة من ١ إلى ٦٠٤"
-            min={1}
-            max={604}
-            value={pageJumpInput}
-            onChange={(e) => setPageJumpInput(e.target.value)}
-            className="h-11 w-16 rounded-xl border border-neutral-200 bg-white px-2 text-center text-xs font-bold tabular-nums text-black focus:border-black focus:outline-none dark:border-neutral-800 dark:bg-black dark:text-white dark:focus:border-white"
-          />
-          <span className="text-xs text-neutral-500 dark:text-neutral-400 tabular-nums">
-            من {toArabicDigits(604)}
-          </span>
-          <button
-            type="submit"
-            className="min-h-[44px] rounded-xl border border-neutral-200 px-3 text-xs font-semibold text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
-          >
-            انتقال
-          </button>
-        </form>
-
-        <button
-          type="button"
-          onClick={() => onChangePage(Math.min(604, currentPage + 1))}
-          disabled={currentPage >= 604}
-          className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-neutral-200 bg-white px-4 py-2 text-xs font-semibold text-black disabled:opacity-35 hover:bg-neutral-50 dark:border-neutral-800 dark:bg-black dark:text-white dark:hover:bg-neutral-950"
-        >
-          <span>الصفحة التالية</span>
-          <ChevronLeft className="h-4 w-4" />
-        </button>
-      </div>
 
       {/* Index Modal: Surahs / Juz / Page */}
       {activeModal === 'index' && (

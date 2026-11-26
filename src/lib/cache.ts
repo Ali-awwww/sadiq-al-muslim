@@ -157,6 +157,159 @@ export function getMushafSvgRemoteUrl(page: number): string {
   return `${ALFURQAN_SVG_PAGE_BASE}/${safePage}`;
 }
 
+function extractSvgSubpathBBox(d: string): {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+} | null {
+  const tokens = d.match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?/g);
+  if (!tokens || tokens.length === 0) return null;
+
+  let i = 0;
+  let cx = 0;
+  let cy = 0;
+  let sx = 0;
+  let sy = 0;
+  let cmd = '';
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  const pushPt = (x: number, y: number) => {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  };
+
+  while (i < tokens.length) {
+    if (/^[a-zA-Z]$/.test(tokens[i])) {
+      cmd = tokens[i++];
+      if (cmd === 'Z' || cmd === 'z') {
+        cx = sx;
+        cy = sy;
+      }
+      continue;
+    }
+    const nextNum = () => parseFloat(tokens[i++]);
+    if (cmd === 'M' || cmd === 'L') {
+      cx = nextNum();
+      cy = nextNum();
+      if (cmd === 'M') {
+        sx = cx;
+        sy = cy;
+        cmd = 'L';
+      }
+      pushPt(cx, cy);
+    } else if (cmd === 'm' || cmd === 'l') {
+      cx += nextNum();
+      cy += nextNum();
+      if (cmd === 'm') {
+        sx = cx;
+        sy = cy;
+        cmd = 'l';
+      }
+      pushPt(cx, cy);
+    } else if (cmd === 'H') {
+      cx = nextNum();
+      pushPt(cx, cy);
+    } else if (cmd === 'h') {
+      cx += nextNum();
+      pushPt(cx, cy);
+    } else if (cmd === 'V') {
+      cy = nextNum();
+      pushPt(cx, cy);
+    } else if (cmd === 'v') {
+      cy += nextNum();
+      pushPt(cx, cy);
+    } else {
+      i++;
+    }
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+  return { minX, maxX, minY, maxY };
+}
+
+/**
+ * Pages 1 & 2 from Al-Furqan wrap their entire green ornamental border inside
+ * `clipPath26` (212x299pt centered inside 383x547pt), leaving ~45% blank padding
+ * inside the SVG's own 510x729 viewBox. Tightening the viewBox to that outer
+ * frame (while preserving the 510.236/729.448 aspect ratio and keeping a small
+ * safety margin) lets the page fill the full available viewport height cleanly.
+ */
+export function normalizeMushafSvgViewBox(svgText: string): string {
+  const svgOpenMatch = svgText.match(/<svg\b[^>]*>/);
+  if (!svgOpenMatch) return svgText;
+
+  const vbMatch = svgOpenMatch[0].match(
+    /\bviewBox\s*=\s*"\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*"/
+  );
+  if (!vbMatch) return svgText;
+
+  const origW = parseFloat(vbMatch[3]);
+  const origH = parseFloat(vbMatch[4]);
+  if (!(origW > 0 && origH > 0)) return svgText;
+
+  // Detect outer page-frame clipPath26 used on pages 1 & 2
+  const clipMatch = svgText.match(
+    /<clipPath\b[^>]*\bid="clipPath26"[^>]*>[\s\S]*?<path\b[^>]*\bd="([^"]+)"/
+  );
+  if (!clipMatch) return svgText;
+
+  const ptBox = extractSvgSubpathBBox(clipMatch[1]);
+  if (!ptBox) return svgText;
+
+  // Read root Inkscape PDF-to-SVG matrix transform (typically 4/3, 0, 0, -4/3, 0, 729.448)
+  const rootMatrixMatch = svgText.match(
+    /<g\b[^>]*\bid="g10"[^>]*\btransform="matrix\(([-\d.eE]+),([-\d.eE]+),([-\d.eE]+),([-\d.eE]+),([-\d.eE]+),([-\d.eE]+)\)"/
+  );
+  const sx = rootMatrixMatch ? parseFloat(rootMatrixMatch[1]) : 1.3333333;
+  const sy = rootMatrixMatch ? parseFloat(rootMatrixMatch[4]) : -1.3333333;
+  const tx = rootMatrixMatch ? parseFloat(rootMatrixMatch[5]) : 0;
+  const ty = rootMatrixMatch ? parseFloat(rootMatrixMatch[6]) : origH;
+
+  const x1 = ptBox.minX * sx + tx;
+  const x2 = ptBox.maxX * sx + tx;
+  const y1 = ptBox.minY * sy + ty;
+  const y2 = ptBox.maxY * sy + ty;
+
+  const frameMinX = Math.min(x1, x2);
+  const frameMaxX = Math.max(x1, x2);
+  const frameMinY = Math.min(y1, y2);
+  const frameMaxY = Math.max(y1, y2);
+  const frameW = frameMaxX - frameMinX;
+  const frameH = frameMaxY - frameMinY;
+
+  // Only normalize if this is a full-frame decorative box significantly smaller than the canvas
+  if (frameW < 150 || frameH < 200 || (frameW > origW * 0.85 && frameH > origH * 0.85)) {
+    return svgText;
+  }
+
+  const targetRatio = origW / origH;
+  const padX = 2;
+  let cropW = frameW + padX * 2;
+  let cropH = cropW / targetRatio;
+  if (cropH < frameH + 4) {
+    cropH = frameH + 4;
+    cropW = cropH * targetRatio;
+  }
+
+  const centerX = (frameMinX + frameMaxX) / 2;
+  const centerY = (frameMinY + frameMaxY) / 2;
+  const cropX = Math.max(0, centerX - cropW / 2);
+  const cropY = Math.max(0, centerY - cropH / 2);
+
+  const newViewBox = `${cropX.toFixed(2)} ${cropY.toFixed(2)} ${cropW.toFixed(2)} ${cropH.toFixed(2)}`;
+  const updatedSvgOpen = svgOpenMatch[0].replace(
+    /\bviewBox\s*=\s*"[^"]*"/,
+    `viewBox="${newViewBox}"`
+  );
+  return svgText.replace(svgOpenMatch[0], updatedSvgOpen);
+}
+
 export async function fetchAndCacheMushafSvg(
   page: number
 ): Promise<{ objectUrl: string; fromCache: boolean }> {
@@ -170,9 +323,12 @@ export async function fetchAndCacheMushafSvg(
       const cache = await caches.open(MUSHAF_SVG_CACHE_NAME);
       const match = await cache.match(url);
       if (match) {
-        const blob = await match.blob();
-        if (blob.size > 0) {
-          return { objectUrl: URL.createObjectURL(blob), fromCache: true };
+        const cachedText = await match.text();
+        if (cachedText.includes('<svg')) {
+          const normalizedBlob = new Blob([normalizeMushafSvgViewBox(cachedText)], {
+            type: 'image/svg+xml',
+          });
+          return { objectUrl: URL.createObjectURL(normalizedBlob), fromCache: true };
         }
       }
     } catch {
@@ -183,7 +339,9 @@ export async function fetchAndCacheMushafSvg(
   // 2. Check IndexedDB fallback
   const idbCachedText = await idbGet<string>(idbKey);
   if (idbCachedText && idbCachedText.includes('<svg')) {
-    const blob = new Blob([idbCachedText], { type: 'image/svg+xml' });
+    const blob = new Blob([normalizeMushafSvgViewBox(idbCachedText)], {
+      type: 'image/svg+xml',
+    });
     return { objectUrl: URL.createObjectURL(blob), fromCache: true };
   }
 
@@ -197,7 +355,8 @@ export async function fetchAndCacheMushafSvg(
     throw new Error('استجابة غير صالحة لصفحة المصحف');
   }
 
-  const svgBlob = new Blob([svgText], { type: 'image/svg+xml' });
+  const normalizedSvg = normalizeMushafSvgViewBox(svgText);
+  const svgBlob = new Blob([normalizedSvg], { type: 'image/svg+xml' });
 
   // Store in Cache API
   if (typeof caches !== 'undefined') {
@@ -211,10 +370,10 @@ export async function fetchAndCacheMushafSvg(
         })
       );
     } catch {
-      await idbSet(idbKey, svgText);
+      await idbSet(idbKey, normalizedSvg);
     }
   } else {
-    await idbSet(idbKey, svgText);
+    await idbSet(idbKey, normalizedSvg);
   }
 
   return { objectUrl: URL.createObjectURL(svgBlob), fromCache: false };
@@ -240,7 +399,8 @@ export async function preloadMushafSvg(page: number): Promise<void> {
     const svgText = await res.text();
     if (!svgText.includes('<svg')) return;
 
-    const svgBlob = new Blob([svgText], { type: 'image/svg+xml' });
+    const normalizedSvg = normalizeMushafSvgViewBox(svgText);
+    const svgBlob = new Blob([normalizedSvg], { type: 'image/svg+xml' });
     if (typeof caches !== 'undefined') {
       const cache = await caches.open(MUSHAF_SVG_CACHE_NAME);
       await cache.put(
@@ -251,7 +411,7 @@ export async function preloadMushafSvg(page: number): Promise<void> {
         })
       );
     } else {
-      await idbSet(idbKey, svgText);
+      await idbSet(idbKey, normalizedSvg);
     }
   } catch {
     // Silent background preload failure

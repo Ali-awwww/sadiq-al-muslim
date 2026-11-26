@@ -229,12 +229,16 @@ function AppShell() {
   return (
     <div
       dir="rtl"
-      className={`min-h-screen bg-white text-black dark:bg-black dark:text-white ${
-        activeTrack
-          ? 'pb-36'
-          : activeTab === 'mushaf' && !mushafControlsVisible
-          ? 'pb-0'
-          : 'pb-20'
+      className={`bg-white text-black dark:bg-black dark:text-white ${
+        activeTab === 'mushaf'
+          ? `h-screen h-[100dvh] overflow-hidden flex flex-col ${
+              activeTrack
+                ? 'pb-36'
+                : mushafControlsVisible
+                ? 'pb-15'
+                : 'pb-0'
+            }`
+          : `min-h-screen ${activeTrack ? 'pb-36' : 'pb-20'}`
       }`}
     >
       {activeTab === 'mushaf' && (
