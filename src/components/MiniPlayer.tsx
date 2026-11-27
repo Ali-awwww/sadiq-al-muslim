@@ -12,6 +12,8 @@ export function MiniPlayer() {
     error,
     currentTime,
     duration,
+    activeSurahNumber,
+    activeAyahInSurah,
     togglePlayPause,
     seek,
     playNext,
@@ -24,6 +26,9 @@ export function MiniPlayer() {
 
   const hasQueue = queue.length > 1;
   const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
+  const displayedAyahNumber =
+    activeTrack.ayahNumberInSurah ??
+    (activeTrack.surahNumber === activeSurahNumber ? activeAyahInSurah : null);
 
   return (
     <div
@@ -62,8 +67,8 @@ export function MiniPlayer() {
             <div className="flex items-center gap-1.5 text-xs font-semibold text-black dark:text-white truncate">
               <span className="truncate">
                 {activeTrack.surahName}
-                {activeTrack.ayahNumberInSurah
-                  ? ` · الآية ${toArabicDigits(activeTrack.ayahNumberInSurah)}`
+                {displayedAyahNumber
+                  ? ` · الآية ${toArabicDigits(displayedAyahNumber)}`
                   : ''}
               </span>
               {activeTrack.isSample && (

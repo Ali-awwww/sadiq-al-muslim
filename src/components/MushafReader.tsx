@@ -19,17 +19,22 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useAudio } from '../context/AudioContext';
-import { getAvailableSurahsForMoshaf, searchQuran } from '../lib/api';
+import { fetchMushafPage, getAvailableSurahsForMoshaf, searchQuran } from '../lib/api';
 import {
   getRevelationLabel,
   resolveJuzFromMeta,
   resolvePageFromMeta,
   toArabicDigits,
 } from '../lib/arabic';
+import {
+  getFirstAyahForPage,
+  getLocationForGlobalAyah,
+} from '../lib/audioSync';
 import { fetchAndCacheMushafSvg, preloadMushafSvg } from '../lib/cache';
 import type {
   BookmarkItem,
   LastReadPosition,
+  MushafPageData,
   QuranMeta,
   Reciter,
   SearchMatch,
@@ -88,7 +93,13 @@ export function MushafReader({
   completedPages,
   onTogglePageCompleted, onControlsVisibleChange,
 }: MushafReaderProps) {
-  const { activeTrack, isPlaying, playSurahFromReciter, togglePlayPause } = useAudio();
+  const {
+    activeTrack,
+    isPlaying,
+    activeAyahGlobalNumber,
+    jumpToSurahAyah,
+    togglePlayPause,
+  } = useAudio();
 
   const [pageSvgUrl, setPageSvgUrl] = useState<string | null>(null);
   const [fromCache, setFromCache] = useState(false);
@@ -119,13 +130,24 @@ export function MushafReader({
         ? (window.visualViewport?.height ?? window.innerHeight)
         : 844,
   }));
+  const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const dragStartRef = useRef<{
+    pointerId: number;
     x: number;
     y: number;
+    startPanX: number;
+    startPanY: number;
     t: number;
     lockedAxis: 'x' | 'y' | null;
     active: boolean;
   } | null>(null);
+
+  // Two-way audio-page synchronization state
+  const [isSyncedToAudio, setIsSyncedToAudio] = useState(true);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [currentPageData, setCurrentPageData] = useState<MushafPageData | null>(null);
+  const lastAutoFlippedPageRef = useRef<number | null>(null);
+  const prevAudioPageRef = useRef<number | null>(null);
 
   // Auto-hide controls: hidden by default, toggled on page tap, auto-hides after ~3s of inactivity
   const [controlsVisible, setControlsVisible] = useState(false);
@@ -223,6 +245,19 @@ export function MushafReader({
   const zoomFactor = pageZoom / 100;
   const pageWidthPx = Math.round(layout.scaledWidth * zoomFactor);
   const pageHeightPx = Math.round(layout.scaledHeight * zoomFactor);
+  const maxPanX = Math.max(0, (pageWidthPx - viewportSize.width) / 2);
+  const maxPanY = Math.max(0, (pageHeightPx - viewportSize.height) / 2);
+
+  useEffect(() => {
+    setPanOffset({ x: 0, y: 0 });
+  }, [currentPage]);
+
+  useEffect(() => {
+    setPanOffset((prev) => ({
+      x: Math.max(-maxPanX, Math.min(maxPanX, prev.x)),
+      y: Math.max(-maxPanY, Math.min(maxPanY, prev.y)),
+    }));
+  }, [maxPanX, maxPanY]);
 
   useEffect(() => {
     setPageJumpInput(String(currentPage));
@@ -311,6 +346,67 @@ export function MushafReader({
     onUpdateLastRead,
   ]);
 
+  const currentPageAnchor = useMemo(
+    () => getFirstAyahForPage(meta, currentPage),
+    [meta, currentPage]
+  );
+
+  const activeAudioLocation = useMemo(
+    () => getLocationForGlobalAyah(meta, activeAyahGlobalNumber),
+    [meta, activeAyahGlobalNumber]
+  );
+
+  const audioPage = activeAudioLocation?.page ?? null;
+
+  // Fetch cached/live page text metadata while audio is playing to display active ayah indicator
+  useEffect(() => {
+    if (!activeTrack) {
+      setCurrentPageData(null);
+      return;
+    }
+    let cancelled = false;
+    fetchMushafPage(currentPage)
+      .then((res) => {
+        if (!cancelled) setCurrentPageData(res.data);
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentPageData(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTrack, currentPage]);
+
+  // Detect manual page changes vs auto-follow page flips
+  useEffect(() => {
+    if (lastAutoFlippedPageRef.current === currentPage) {
+      lastAutoFlippedPageRef.current = null;
+      return;
+    }
+    if (activeTrack && audioPage !== null) {
+      setIsSyncedToAudio(audioPage === currentPage);
+    }
+  }, [currentPage, activeTrack, audioPage]);
+
+  // Auto-follow: flip page automatically when active recited ayah moves to a new page
+  useEffect(() => {
+    if (!isPlaying || !isSyncedToAudio || !activeAudioLocation) {
+      prevAudioPageRef.current = activeAudioLocation?.page ?? null;
+      return;
+    }
+
+    const nextAudioPage = activeAudioLocation.page;
+    const prevAudioPage = prevAudioPageRef.current;
+    prevAudioPageRef.current = nextAudioPage;
+
+    if (dragStartRef.current?.active) return;
+
+    if (nextAudioPage !== currentPage && nextAudioPage !== prevAudioPage) {
+      lastAutoFlippedPageRef.current = nextAudioPage;
+      onChangePage(nextAudioPage);
+    }
+  }, [isPlaying, isSyncedToAudio, activeAudioLocation, currentPage, onChangePage]);
+
   const currentReciter = useMemo(
     () => reciters.find((r) => r.id === selectedReciterId) ?? reciters[0] ?? null,
     [reciters, selectedReciterId]
@@ -319,40 +415,101 @@ export function MushafReader({
   const isPageBookmarked = bookmarks.some((b) => b.page === currentPage && b.type === 'page');
   const isPageCompleted = completedPages.includes(currentPage);
 
-  const isPlayingCurrentPageSurah = Boolean(
+  const isAudioSyncedOnCurrentPage = Boolean(
     activeTrack &&
-      activeTrack.kind === 'surah' &&
-      activeTrack.surahNumber === primarySurah.surahNumber &&
-      isPlaying
+      isSyncedToAudio &&
+      (audioPage !== null
+        ? audioPage === currentPage
+        : activeTrack.surahNumber === currentPageAnchor.surahNumber)
   );
 
-  const handlePlayPageSurah = async () => {
-    if (
-      activeTrack &&
-      activeTrack.kind === 'surah' &&
-      activeTrack.surahNumber === primarySurah.surahNumber
-    ) {
-      togglePlayPause();
-      return;
-    }
+  const isPlayingCurrentPage = isAudioSyncedOnCurrentPage && isPlaying;
 
+  const isAudioOnDifferentPage = Boolean(
+    activeTrack &&
+      activeTrack.kind === 'surah' &&
+      audioPage !== null &&
+      audioPage !== currentPage
+  );
+
+  const startPlaybackFromCurrentPage = useCallback(async () => {
+    setSyncNotice(null);
     if (!currentReciter || currentReciter.moshaf.length === 0) {
       setReciterSheetOpen(true);
       return;
     }
 
-    const moshaf =
-      currentReciter.moshaf.find((m) =>
-        getAvailableSurahsForMoshaf(m).has(primarySurah.surahNumber)
-      ) ?? currentReciter.moshaf[0];
+    const targetSurah = currentPageAnchor.surahNumber;
+    const targetSurahRef = meta?.surahs.references.find((s) => s.number === targetSurah);
+    const targetSurahName =
+      targetSurahRef?.name ??
+      (targetSurah === primarySurah.surahNumber
+        ? primarySurah.surahName
+        : `سورة رقم ${toArabicDigits(targetSurah)}`);
 
-    await playSurahFromReciter(
+    const moshaf = currentReciter.moshaf.find((m) =>
+      getAvailableSurahsForMoshaf(m).has(targetSurah)
+    );
+
+    if (!moshaf) {
+      setSyncNotice('هذه السورة غير متوفرة لدى القارئ المختار، اختر قارئاً آخر.');
+      setReciterSheetOpen(true);
+      return;
+    }
+
+    const availableSet = getAvailableSurahsForMoshaf(moshaf);
+    const queueSurahs = (meta?.surahs.references ?? [])
+      .filter((s) => availableSet.has(s.number))
+      .map((s) => ({ number: s.number, name: s.name }));
+
+    setIsSyncedToAudio(true);
+    await jumpToSurahAyah(
       currentReciter,
       moshaf,
-      primarySurah.surahNumber,
-      primarySurah.surahName
+      targetSurah,
+      targetSurahName,
+      currentPageAnchor.ayahNumber,
+      queueSurahs.length > 0
+        ? queueSurahs
+        : [{ number: targetSurah, name: targetSurahName }],
+      currentPageAnchor.globalAyahNumber
     );
+  }, [
+    currentPageAnchor,
+    currentReciter,
+    jumpToSurahAyah,
+    meta,
+    primarySurah.surahName,
+    primarySurah.surahNumber,
+  ]);
+
+  const handlePlayPageSurah = async () => {
+    if (isAudioSyncedOnCurrentPage) {
+      togglePlayPause();
+      return;
+    }
+    await startPlaybackFromCurrentPage();
   };
+
+  useEffect(() => {
+    if (!syncNotice) return;
+    const t = setTimeout(() => setSyncNotice(null), 4000);
+    return () => clearTimeout(t);
+  }, [syncNotice]);
+
+  const activePageAyahObj = useMemo(() => {
+    if (!isAudioSyncedOnCurrentPage || !activeAudioLocation || !currentPageData?.ayahs) {
+      return null;
+    }
+    return (
+      currentPageData.ayahs.find(
+        (a) =>
+          a.number === activeAudioLocation.globalAyahNumber ||
+          (a.surah?.number === activeAudioLocation.surahNumber &&
+            a.numberInSurah === activeAudioLocation.ayahNumberInSurah)
+      ) ?? null
+    );
+  }, [activeAudioLocation, currentPageData, isAudioSyncedOnCurrentPage]);
 
   const handleSearchSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -394,15 +551,21 @@ export function MushafReader({
 
   // Pointer pan + swipe / mouse drag handlers (Arabic RTL book: right = next page, left = prev page)
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (activeModal !== null || reciterSheetOpen) return;
     if (e.button !== 0 && e.pointerType === 'mouse') return;
+    if (dragStartRef.current?.active) return;
+
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
       // ignore pointer capture unsupported
     }
     dragStartRef.current = {
+      pointerId: e.pointerId,
       x: e.clientX,
       y: e.clientY,
+      startPanX: panOffset.x,
+      startPanY: panOffset.y,
       t: Date.now(),
       lockedAxis: null,
       active: true,
@@ -411,18 +574,25 @@ export function MushafReader({
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragStartRef.current;
-    if (!drag?.active) return;
+    if (!drag?.active || drag.pointerId !== e.pointerId) return;
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
 
     if (!drag.lockedAxis && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
       drag.lockedAxis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
     }
+
+    if (maxPanX > 2 || maxPanY > 2) {
+      setPanOffset({
+        x: Math.max(-maxPanX, Math.min(maxPanX, drag.startPanX + dx)),
+        y: Math.max(-maxPanY, Math.min(maxPanY, drag.startPanY + dy)),
+      });
+    }
   };
 
   const handlePointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragStartRef.current;
-    if (!drag?.active) return;
+    if (!drag?.active || drag.pointerId !== e.pointerId) return;
     try {
       if (e.currentTarget.hasPointerCapture(e.pointerId)) {
         e.currentTarget.releasePointerCapture(e.pointerId);
@@ -434,6 +604,7 @@ export function MushafReader({
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
     const dt = Date.now() - drag.t;
+    const startPanX = drag.startPanX;
 
     dragStartRef.current = null;
 
@@ -449,9 +620,20 @@ export function MushafReader({
       return;
     }
 
-    // Swipe horizontally flips pages instantly without slide animation
-    const isMostlyHorizontal = Math.abs(dx) > Math.abs(dy) * 1.2;
-    if (Math.abs(dx) >= 48 && isMostlyHorizontal) {
+    // Swipe horizontally flips pages (Arabic RTL book: swipe right = next page, swipe left = prev page)
+    const isMostlyHorizontal = Math.abs(dx) > Math.abs(dy) * 1.15;
+    let shouldFlip = false;
+    if (maxPanX <= 2) {
+      shouldFlip = isMostlyHorizontal && (Math.abs(dx) >= 40 || (Math.abs(dx) >= 28 && dt < 220));
+    } else if (isMostlyHorizontal) {
+      // When zoomed in, allow panning first; flip if swiping past the pan boundary
+      const overscrollRight = startPanX + dx - maxPanX;
+      const overscrollLeft = -maxPanX - (startPanX + dx);
+      if (dx > 0 && overscrollRight >= 44) shouldFlip = true;
+      if (dx < 0 && overscrollLeft >= 44) shouldFlip = true;
+    }
+
+    if (shouldFlip) {
       const nextPage =
         dx > 0 && currentPage < 604
           ? currentPage + 1
@@ -564,12 +746,12 @@ export function MushafReader({
           {/* Play / Pause Surah Audio */}
           <button
             type="button"
-            onClick={handlePlayPageSurah}
-            aria-label={isPlayingCurrentPageSurah ? 'إيقاف تلاوة الصفحة' : 'تشغيل تلاوة الصفحة'}
+            onClick={() => void handlePlayPageSurah()}
+            aria-label={isPlayingCurrentPage ? 'إيقاف تلاوة الصفحة' : 'تشغيل تلاوة الصفحة'}
             title="تشغيل تلاوة الصفحة"
             className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-black text-white dark:bg-white dark:text-black transition-transform active:scale-95"
           >
-            {isPlayingCurrentPageSurah ? (
+            {isPlayingCurrentPage ? (
               <Pause className="h-4 w-4" />
             ) : (
               <Play className="h-4 w-4" />
@@ -704,19 +886,22 @@ export function MushafReader({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerEnd}
-        onPointerCancel={() => {
-          dragStartRef.current = null;
+        onPointerCancel={(e) => {
+          if (dragStartRef.current?.pointerId === e.pointerId) {
+            dragStartRef.current = null;
+          }
         }}
-        onLostPointerCapture={() => {
-          dragStartRef.current = null;
-        }}
-        className="w-full h-full select-none cursor-grab active:cursor-grabbing bg-[#FAF6EC] overflow-hidden flex items-center justify-center"
+        className="w-full h-full touch-none select-none cursor-grab active:cursor-grabbing bg-[#FAF6EC] overflow-hidden flex items-center justify-center"
       >
         <div
           className="relative shrink-0 flex items-center justify-center bg-[#FAF6EC]"
           style={{
             width: `${pageWidthPx}px`,
             height: `${pageHeightPx}px`,
+            transform:
+              panOffset.x !== 0 || panOffset.y !== 0
+                ? `translate3d(${panOffset.x}px, ${panOffset.y}px, 0)`
+                : undefined,
           }}
         >
           {loading && !pageSvgUrl ? (
@@ -773,6 +958,61 @@ export function MushafReader({
           )}
         </div>
       </main>
+
+      {/* Audio Sync Action Bar (when audio is playing on another page) or Live Ayah Indicator */}
+      {isAudioOnDifferentPage && audioPage !== null && (
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          className="fixed bottom-[150px] left-3 right-3 z-30 flex justify-center pointer-events-none"
+        >
+          <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2 rounded-2xl border border-neutral-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur-md dark:border-neutral-800 dark:bg-black/95">
+            <button
+              type="button"
+              onClick={() => void startPlaybackFromCurrentPage()}
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-black px-3.5 py-1.5 text-xs font-bold text-white dark:bg-white dark:text-black transition-transform active:scale-95"
+            >
+              <Play className="h-3.5 w-3.5 shrink-0" />
+              <span>تشغيل من هذه الصفحة</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setIsSyncedToAudio(true);
+                onChangePage(audioPage);
+              }}
+              className="inline-flex min-h-[38px] items-center gap-1 rounded-xl border border-neutral-200 px-3 py-1.5 text-xs font-semibold text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-900"
+            >
+              <span>متابعة التلاوة (ص {toArabicDigits(audioPage)})</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!isAudioOnDifferentPage && isAudioSyncedOnCurrentPage && activeAudioLocation && (
+        <div className="fixed bottom-[150px] left-3 right-3 z-20 flex justify-center pointer-events-none">
+          <div className="max-w-md rounded-2xl border border-neutral-200/90 bg-white/92 px-3.5 py-1.5 text-center shadow-xs backdrop-blur-md dark:border-neutral-800 dark:bg-black/92">
+            <div className="text-[11px] font-bold text-black dark:text-white">
+              {meta?.surahs.references.find((s) => s.number === activeAudioLocation.surahNumber)?.name ??
+                primarySurah.surahName}{' '}
+              · الآية {toArabicDigits(activeAudioLocation.ayahNumberInSurah)}
+            </div>
+            {activePageAyahObj?.text && (
+              <p className="mt-0.5 truncate font-quran text-xs text-neutral-600 dark:text-neutral-300">
+                {activePageAyahObj.text}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {syncNotice && (
+        <div className="fixed top-16 left-3 right-3 z-40 flex justify-center pointer-events-none">
+          <div className="rounded-xl border border-neutral-300 bg-white px-4 py-2 text-xs font-semibold text-black shadow-sm dark:border-neutral-700 dark:bg-black dark:text-white">
+            {syncNotice}
+          </div>
+        </div>
+      )}
 
       {/* Index Modal: Surahs / Juz / Page */}
       {activeModal === 'index' && (

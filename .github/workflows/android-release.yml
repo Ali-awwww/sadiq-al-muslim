@@ -1,7 +1,7 @@
 name: Android release (signed APK)
 
 # يبني APK موقّعاً للإصدار من مشروع Android، ويتحقق أن توقيعه وبصمته
-# SHA-256 يطابقان الـ Keystore الجديد، ثم ينشئ إصدار GitHub v1.4.2
+# SHA-256 يطابقان الـ Keystore الجديد، ثم ينشئ إصدار GitHub v1.4.3
 # مرفقاً به الـ APK عند طلب ذلك.
 #
 # الأسرار المطلوبة في المستودع:
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: 'إنشاء إصدار GitHub v1.4.2 مرفقاً به الـ APK؟'
+        description: 'إنشاء إصدار GitHub v1.4.3 مرفقاً به الـ APK؟'
         required: true
         type: boolean
         default: true
@@ -27,7 +27,7 @@ on:
         description: 'وسم الإصدار'
         required: true
         type: string
-        default: v1.4.2
+        default: v1.4.3
   push:
     branches: [main]
     paths:
@@ -168,18 +168,18 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sadiq-al-muslim-v1.4.2-apk
+          name: sadiq-al-muslim-v1.4.3-apk
           path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
-      - name: Create GitHub release v1.4.2
+      - name: Create GitHub release v1.4.3
         if: ${{ inputs.create_release && steps.verify.outputs.sha256 != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
-          name: "صديق المسلم v1.4.2"
+          name: "صديق المسلم v1.4.3"
           body: |
-            الإصدار 1.4.2 من تطبيق «صديق المسلم» (versionCode 7) — تحديث جديد: تعميم تطبيع أبعاد صفحات المصحف لملء الشاشة بالكامل دون حشو فارغ أو قص للمحتوى.
+            الإصدار 1.4.3 من تطبيق «صديق المسلم» (versionCode 8) — مزامنة الصوت مع صفحة المصحف بالاتجاهين وإصلاح تقليب الصفحات بالسحب الأفقي.
 
             - مصحف متكامل على الويب: قراءة بالرسم العثماني، تلاوة القراء، تفسير، حفظ، وتتبع الختمة.
             - تذكيرات محلية بإشعارات أندرويد.

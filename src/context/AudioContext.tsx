@@ -1,5 +1,13 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { fetchSurahUthmani, getAyahSampleAudio, getSurahAudioUrl } from '../lib/api';
+import {
+  buildSurahWeightEntries,
+  fetchSurahAyahTimings,
+  getSeekTimeSecondsForAyah,
+  resolveActiveAyahFromTime,
+  type AyahTimingSegment,
+  type SurahWeightEntry,
+} from '../lib/audioSync';
 import { getCachedAudioObjectUrl } from '../lib/cache';
 import type { Ayah, Moshaf, Reciter } from '../types/quran';
 
@@ -9,10 +17,24 @@ export interface AudioTrack {
   surahNumber: number;
   surahName: string;
   reciterName: string;
+  reciterId?: number;
+  moshafId?: number;
   url: string;
   ayahNumberInSurah?: number;
   globalAyahNumber?: number;
   isSample?: boolean;
+}
+
+export interface PlaySurahOptions {
+  startAyahNumber?: number;
+  startGlobalAyahNumber?: number;
+}
+
+interface PendingSeekTarget {
+  trackId: string;
+  surahNumber: number;
+  ayahNumberInSurah: number;
+  globalAyahNumber?: number;
 }
 
 interface AudioContextValue {
@@ -25,13 +47,30 @@ interface AudioContextValue {
   currentTime: number;
   duration: number;
   activeAyahGlobalNumber: number | null;
-  playTrack: (track: AudioTrack, queue?: AudioTrack[], startIndex?: number) => Promise<void>;
+  activeSurahNumber: number | null;
+  activeAyahInSurah: number | null;
+  playTrack: (
+    track: AudioTrack,
+    queue?: AudioTrack[],
+    startIndex?: number,
+    options?: PlaySurahOptions
+  ) => Promise<void>;
   playSurahFromReciter: (
     reciter: Reciter,
     moshaf: Moshaf,
     surahNumber: number,
     surahName: string,
-    queueSurahs?: Array<{ number: number; name: string }>
+    queueSurahs?: Array<{ number: number; name: string }>,
+    options?: PlaySurahOptions
+  ) => Promise<void>;
+  jumpToSurahAyah: (
+    reciter: Reciter,
+    moshaf: Moshaf,
+    surahNumber: number,
+    surahName: string,
+    ayahNumberInSurah: number,
+    queueSurahs?: Array<{ number: number; name: string }>,
+    globalAyahNumber?: number
   ) => Promise<void>;
   playAyahSample: (ayah: Ayah, surahName: string) => Promise<void>;
   togglePlayPause: () => void;
@@ -47,6 +86,14 @@ const AudioContext = createContext<AudioContextValue | null>(null);
 export function AudioProvider({ children }: { children: React.ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
+  const playbackTokenRef = useRef(0);
+  const activeTrackIdRef = useRef<string | null>(null);
+  const pendingSeekRef = useRef<PendingSeekTarget | null>(null);
+  const timingsRef = useRef<AyahTimingSegment[]>([]);
+  const timingsReadyRef = useRef(false);
+  const weightsRef = useRef<SurahWeightEntry[]>([]);
+  const weightsReadyRef = useRef(false);
+  const unmuteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [activeTrack, setActiveTrack] = useState<AudioTrack | null>(null);
   const [queue, setQueue] = useState<AudioTrack[]>([]);
@@ -56,7 +103,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [surahAyahWeights, setSurahAyahWeights] = useState<Array<{ globalNumber: number; endRatio: number }>>([]);
+  const [surahTimings, setSurahTimings] = useState<AyahTimingSegment[]>([]);
+  const [surahAyahWeights, setSurahAyahWeights] = useState<SurahWeightEntry[]>([]);
+  const [pendingTargetAyah, setPendingTargetAyah] = useState<PendingSeekTarget | null>(null);
 
   const cleanupObjectUrl = () => {
     if (objectUrlRef.current) {
@@ -65,46 +114,178 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const loadSurahTimingWeights = useCallback(async (surahNumber: number) => {
-    try {
-      const { data } = await fetchSurahUthmani(surahNumber);
-      const weights = data.ayahs.map((a) => Math.max(12, a.text.length));
-      const total = weights.reduce((acc, w) => acc + w, 0);
-      let cumulative = 0;
-      const mapped = data.ayahs.map((a, idx) => {
-        cumulative += weights[idx];
-        return {
-          globalNumber: a.number,
-          endRatio: cumulative / total,
-        };
-      });
-      setSurahAyahWeights(mapped);
-    } catch {
-      setSurahAyahWeights([]);
+  const clearUnmuteTimer = () => {
+    if (unmuteTimerRef.current) {
+      clearTimeout(unmuteTimerRef.current);
+      unmuteTimerRef.current = null;
+    }
+  };
+
+  const safeUnmute = useCallback(() => {
+    clearUnmuteTimer();
+    const audio = audioRef.current;
+    if (audio) {
+      audio.muted = false;
     }
   }, []);
 
+  const tryApplyPendingSeek = useCallback(() => {
+    const audio = audioRef.current;
+    const pending = pendingSeekRef.current;
+    if (!audio || !pending) return false;
+    if (activeTrackIdRef.current !== pending.trackId) return false;
+    if (audio.readyState < 1) return false; // wait for loadedmetadata
+
+    const dur = Number.isFinite(audio.duration) ? audio.duration : 0;
+
+    // Wait until timing table check completes before falling back to weights
+    if (!timingsReadyRef.current) return false;
+
+    const hasTimings = timingsRef.current.length > 0;
+    if (!hasTimings && !weightsReadyRef.current) return false;
+
+    const seekSec = getSeekTimeSecondsForAyah({
+      surahNumber: pending.surahNumber,
+      ayahNumberInSurah: pending.ayahNumberInSurah,
+      timings: timingsRef.current,
+      durationSeconds: dur,
+      weights: weightsRef.current,
+    });
+
+    if (seekSec === null) return false;
+
+    pendingSeekRef.current = null;
+    setPendingTargetAyah(null);
+
+    if (seekSec > 0.05 && Math.abs(audio.currentTime - seekSec) > 0.25) {
+      const handleSeeked = () => {
+        safeUnmute();
+      };
+      audio.addEventListener('seeked', handleSeeked, { once: true });
+      clearUnmuteTimer();
+      unmuteTimerRef.current = setTimeout(() => {
+        audio.removeEventListener('seeked', handleSeeked);
+        safeUnmute();
+      }, 600);
+
+      audio.currentTime = seekSec;
+      setCurrentTime(seekSec);
+    } else {
+      safeUnmute();
+    }
+
+    return true;
+  }, [safeUnmute]);
+
+  const loadSurahSyncData = useCallback(
+    async (track: AudioTrack, token: number) => {
+      timingsRef.current = [];
+      timingsReadyRef.current = false;
+      weightsRef.current = [];
+      weightsReadyRef.current = false;
+
+      const timingPromise = track.moshafId
+        ? fetchSurahAyahTimings(track.moshafId, track.surahNumber)
+        : Promise.resolve<AyahTimingSegment[]>([]);
+
+      const weightsPromise = fetchSurahUthmani(track.surahNumber)
+        .then(({ data }) => buildSurahWeightEntries(data.ayahs))
+        .catch(() => [] as SurahWeightEntry[]);
+
+      const [timings, weights] = await Promise.all([
+        timingPromise.then((res) => {
+          if (playbackTokenRef.current === token) {
+            timingsRef.current = res;
+            timingsReadyRef.current = true;
+            setSurahTimings(res);
+            if (res.length > 0) {
+              tryApplyPendingSeek();
+            }
+          }
+          return res;
+        }),
+        weightsPromise.then((res) => {
+          if (playbackTokenRef.current === token) {
+            weightsRef.current = res;
+            weightsReadyRef.current = true;
+            setSurahAyahWeights(res);
+          }
+          return res;
+        }),
+      ]);
+
+      if (playbackTokenRef.current !== token) return;
+
+      if (timings.length === 0 && weights.length === 0) {
+        // Nothing available to seek by; unmute cleanly
+        pendingSeekRef.current = null;
+        setPendingTargetAyah(null);
+        safeUnmute();
+        return;
+      }
+
+      tryApplyPendingSeek();
+    },
+    [safeUnmute, tryApplyPendingSeek]
+  );
+
   const startPlaybackForTrack = useCallback(
-    async (track: AudioTrack) => {
+    async (track: AudioTrack, options?: PlaySurahOptions) => {
       const audio = audioRef.current;
       if (!audio) return;
+
+      const token = ++playbackTokenRef.current;
+      activeTrackIdRef.current = track.id;
+
+      const startAyah =
+        options?.startAyahNumber && options.startAyahNumber > 1
+          ? Math.floor(options.startAyahNumber)
+          : 1;
 
       setError(null);
       setIsLoading(true);
       setCurrentTime(0);
       setDuration(0);
       setActiveTrack(track);
+      setSurahTimings([]);
+      setSurahAyahWeights([]);
+      clearUnmuteTimer();
+
+      if (track.kind === 'surah' && startAyah > 1) {
+        const pending: PendingSeekTarget = {
+          trackId: track.id,
+          surahNumber: track.surahNumber,
+          ayahNumberInSurah: startAyah,
+          globalAyahNumber: options?.startGlobalAyahNumber,
+        };
+        pendingSeekRef.current = pending;
+        setPendingTargetAyah(pending);
+        // Temporarily mute during initial metadata/seek so Ayah 1 isn't heard before jumping
+        audio.muted = true;
+        unmuteTimerRef.current = setTimeout(() => {
+          safeUnmute();
+        }, 2500);
+      } else {
+        pendingSeekRef.current = null;
+        setPendingTargetAyah(null);
+        audio.muted = false;
+      }
 
       if (track.kind === 'surah') {
-        void loadSurahTimingWeights(track.surahNumber);
+        void loadSurahSyncData(track, token);
       } else {
-        setSurahAyahWeights([]);
+        timingsRef.current = [];
+        timingsReadyRef.current = true;
+        weightsRef.current = [];
+        weightsReadyRef.current = true;
       }
 
       cleanupObjectUrl();
 
       try {
         const cachedBlobUrl = await getCachedAudioObjectUrl(track.url);
+        if (playbackTokenRef.current !== token) return;
+
         if (cachedBlobUrl) {
           objectUrlRef.current = cachedBlobUrl;
           audio.src = cachedBlobUrl;
@@ -114,6 +295,10 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         audio.load();
         await audio.play();
       } catch (err) {
+        if (playbackTokenRef.current !== token) return;
+        safeUnmute();
+        pendingSeekRef.current = null;
+        setPendingTargetAyah(null);
         setIsLoading(false);
         setIsPlaying(false);
         if (err instanceof Error && err.name === 'NotAllowedError') {
@@ -123,11 +308,16 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         }
       }
     },
-    [loadSurahTimingWeights]
+    [loadSurahSyncData, safeUnmute]
   );
 
   const playTrack = useCallback(
-    async (track: AudioTrack, nextQueue?: AudioTrack[], startIndex = 0) => {
+    async (
+      track: AudioTrack,
+      nextQueue?: AudioTrack[],
+      startIndex = 0,
+      options?: PlaySurahOptions
+    ) => {
       if (nextQueue && nextQueue.length > 0) {
         setQueue(nextQueue);
         setQueueIndex(startIndex);
@@ -135,7 +325,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
         setQueue([track]);
         setQueueIndex(0);
       }
-      await startPlaybackForTrack(track);
+      await startPlaybackForTrack(track, options);
     },
     [startPlaybackForTrack]
   );
@@ -146,7 +336,8 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       moshaf: Moshaf,
       surahNumber: number,
       surahName: string,
-      queueSurahs?: Array<{ number: number; name: string }>
+      queueSurahs?: Array<{ number: number; name: string }>,
+      options?: PlaySurahOptions
     ) => {
       if (queueSurahs && queueSurahs.length > 0) {
         const tracks: AudioTrack[] = queueSurahs.map((s) => ({
@@ -155,10 +346,12 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
           surahNumber: s.number,
           surahName: s.name,
           reciterName: reciter.name,
+          reciterId: reciter.id,
+          moshafId: moshaf.id,
           url: getSurahAudioUrl(moshaf, s.number),
         }));
         const idx = Math.max(0, tracks.findIndex((t) => t.surahNumber === surahNumber));
-        await playTrack(tracks[idx], tracks, idx);
+        await playTrack(tracks[idx], tracks, idx, options);
       } else {
         const track: AudioTrack = {
           id: `${reciter.id}-${moshaf.id}-${surahNumber}`,
@@ -166,12 +359,83 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
           surahNumber,
           surahName,
           reciterName: reciter.name,
+          reciterId: reciter.id,
+          moshafId: moshaf.id,
           url: getSurahAudioUrl(moshaf, surahNumber),
         };
-        await playTrack(track);
+        await playTrack(track, undefined, 0, options);
       }
     },
     [playTrack]
+  );
+
+  const jumpToSurahAyah = useCallback(
+    async (
+      reciter: Reciter,
+      moshaf: Moshaf,
+      surahNumber: number,
+      surahName: string,
+      ayahNumberInSurah: number,
+      queueSurahs?: Array<{ number: number; name: string }>,
+      globalAyahNumber?: number
+    ) => {
+      const targetTrackId = `${reciter.id}-${moshaf.id}-${surahNumber}`;
+      const audio = audioRef.current;
+      const safeAyah = Math.max(1, Math.floor(ayahNumberInSurah));
+
+      if (
+        audio &&
+        activeTrack &&
+        activeTrack.id === targetTrackId &&
+        audio.src
+      ) {
+        const pending: PendingSeekTarget = {
+          trackId: targetTrackId,
+          surahNumber,
+          ayahNumberInSurah: safeAyah,
+          globalAyahNumber,
+        };
+        pendingSeekRef.current = pending;
+        setPendingTargetAyah(pending);
+
+        if (safeAyah === 1) {
+          pendingSeekRef.current = null;
+          setPendingTargetAyah(null);
+          audio.currentTime = 0;
+          setCurrentTime(0);
+          safeUnmute();
+        } else {
+          const applied = tryApplyPendingSeek();
+          if (!applied) {
+            audio.muted = true;
+          }
+        }
+
+        if (audio.paused) {
+          setError(null);
+          try {
+            await audio.play();
+          } catch {
+            safeUnmute();
+            setError('اضغط تشغيل لبدء الصوت');
+          }
+        }
+        return;
+      }
+
+      await playSurahFromReciter(
+        reciter,
+        moshaf,
+        surahNumber,
+        surahName,
+        queueSurahs,
+        {
+          startAyahNumber: safeAyah,
+          startGlobalAyahNumber: globalAyahNumber,
+        }
+      );
+    },
+    [activeTrack, playSurahFromReciter, safeUnmute, tryApplyPendingSeek]
   );
 
   const playAyahSample = useCallback(
@@ -229,16 +493,32 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     }
   }, [activeTrack]);
 
-  const seek = useCallback((time: number) => {
-    const audio = audioRef.current;
-    if (!audio || !Number.isFinite(time)) return;
-    audio.currentTime = Math.max(0, Math.min(time, audio.duration || time));
-    setCurrentTime(audio.currentTime);
-  }, []);
+  const seek = useCallback(
+    (time: number) => {
+      const audio = audioRef.current;
+      if (!audio || !Number.isFinite(time)) return;
+      pendingSeekRef.current = null;
+      setPendingTargetAyah(null);
+      safeUnmute();
+      audio.currentTime = Math.max(0, Math.min(time, audio.duration || time));
+      setCurrentTime(audio.currentTime);
+    },
+    [safeUnmute]
+  );
 
   const stop = useCallback(() => {
+    playbackTokenRef.current += 1;
+    activeTrackIdRef.current = null;
+    pendingSeekRef.current = null;
+    timingsRef.current = [];
+    timingsReadyRef.current = false;
+    weightsRef.current = [];
+    weightsReadyRef.current = false;
+    clearUnmuteTimer();
+
     const audio = audioRef.current;
     if (audio) {
+      audio.muted = false;
       audio.pause();
       audio.removeAttribute('src');
       audio.load();
@@ -252,7 +532,9 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     setError(null);
     setCurrentTime(0);
     setDuration(0);
+    setSurahTimings([]);
     setSurahAyahWeights([]);
+    setPendingTargetAyah(null);
   }, []);
 
   const retryCurrent = useCallback(() => {
@@ -269,16 +551,27 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     const onLoadStart = () => setIsLoading(true);
     const onLoadedMetadata = () => {
       setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+      tryApplyPendingSeek();
       setIsLoading(false);
     };
-    const onCanPlay = () => setIsLoading(false);
+    const onCanPlay = () => {
+      tryApplyPendingSeek();
+      setIsLoading(false);
+    };
     const onPlay = () => {
       setIsPlaying(true);
       setIsLoading(false);
     };
     const onPause = () => setIsPlaying(false);
-    const onTimeUpdate = () => setCurrentTime(audio.currentTime);
+    const onTimeUpdate = () => {
+      if (!pendingSeekRef.current) {
+        setCurrentTime(audio.currentTime);
+      }
+    };
     const onError = () => {
+      safeUnmute();
+      pendingSeekRef.current = null;
+      setPendingTargetAyah(null);
       setIsLoading(false);
       setIsPlaying(false);
       setError('تعذر تحميل التلاوة الصوتية من الخادم');
@@ -293,6 +586,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     audio.addEventListener('error', onError);
 
     return () => {
+      clearUnmuteTimer();
       audio.pause();
       cleanupObjectUrl();
       audio.removeEventListener('loadstart', onLoadStart);
@@ -303,7 +597,7 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       audio.removeEventListener('timeupdate', onTimeUpdate);
       audio.removeEventListener('error', onError);
     };
-  }, []);
+  }, [safeUnmute, tryApplyPendingSeek]);
 
   // Separate effect for ended so it uses latest playNext
   useEffect(() => {
@@ -320,20 +614,60 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
     return () => audio.removeEventListener('ended', onEnded);
   }, [playNext, queue.length, queueIndex]);
 
-  const activeAyahGlobalNumber = useMemo(() => {
-    if (!activeTrack || (!isPlaying && currentTime === 0)) return null;
-    if (activeTrack.kind === 'ayah-sample') {
-      return activeTrack.globalAyahNumber ?? null;
+  const resolvedActiveAyah = useMemo(() => {
+    if (!activeTrack) return null;
+
+    if (pendingTargetAyah && pendingTargetAyah.trackId === activeTrack.id) {
+      const fromWeights = surahAyahWeights.find(
+        (w) => w.ayahNumberInSurah === pendingTargetAyah.ayahNumberInSurah
+      );
+      const firstGlobal = surahAyahWeights[0]?.globalNumber;
+      const globalNum =
+        pendingTargetAyah.globalAyahNumber ??
+        fromWeights?.globalNumber ??
+        (firstGlobal !== undefined
+          ? firstGlobal + pendingTargetAyah.ayahNumberInSurah - 1
+          : null);
+      if (globalNum !== null) {
+        return {
+          ayahNumberInSurah: pendingTargetAyah.ayahNumberInSurah,
+          globalAyahNumber: globalNum,
+        };
+      }
+      return null;
     }
-    if (surahAyahWeights.length === 0 || duration <= 0) return null;
-    // Account for ~2.5s Basmala intro if surah has separate Basmala
-    const introOffset = activeTrack.surahNumber !== 1 && activeTrack.surahNumber !== 9 ? Math.min(2.5, duration * 0.05) : 0;
-    const effectiveElapsed = Math.max(0, currentTime - introOffset);
-    const effectiveDuration = Math.max(1, duration - introOffset);
-    const ratio = Math.min(1, effectiveElapsed / effectiveDuration);
-    const match = surahAyahWeights.find((w) => ratio <= w.endRatio);
-    return match ? match.globalNumber : surahAyahWeights[surahAyahWeights.length - 1]?.globalNumber ?? null;
-  }, [activeTrack, currentTime, duration, isPlaying, surahAyahWeights]);
+
+    if (!isPlaying && currentTime === 0) return null;
+
+    if (activeTrack.kind === 'ayah-sample') {
+      if (activeTrack.globalAyahNumber == null) return null;
+      return {
+        ayahNumberInSurah: activeTrack.ayahNumberInSurah ?? 1,
+        globalAyahNumber: activeTrack.globalAyahNumber,
+      };
+    }
+
+    return resolveActiveAyahFromTime({
+      currentTimeSeconds: currentTime,
+      durationSeconds: duration,
+      surahNumber: activeTrack.surahNumber,
+      timings: surahTimings,
+      weights: surahAyahWeights,
+      firstGlobalAyahOfSurah: surahAyahWeights[0]?.globalNumber,
+    });
+  }, [
+    activeTrack,
+    currentTime,
+    duration,
+    isPlaying,
+    pendingTargetAyah,
+    surahAyahWeights,
+    surahTimings,
+  ]);
+
+  const activeAyahGlobalNumber = resolvedActiveAyah?.globalAyahNumber ?? null;
+  const activeSurahNumber = activeTrack?.surahNumber ?? null;
+  const activeAyahInSurah = resolvedActiveAyah?.ayahNumberInSurah ?? null;
 
   const value = useMemo<AudioContextValue>(
     () => ({
@@ -346,8 +680,11 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       currentTime,
       duration,
       activeAyahGlobalNumber,
+      activeSurahNumber,
+      activeAyahInSurah,
       playTrack,
       playSurahFromReciter,
+      jumpToSurahAyah,
       playAyahSample,
       togglePlayPause,
       seek,
@@ -366,8 +703,11 @@ export function AudioProvider({ children }: { children: React.ReactNode }) {
       currentTime,
       duration,
       activeAyahGlobalNumber,
+      activeSurahNumber,
+      activeAyahInSurah,
       playTrack,
       playSurahFromReciter,
+      jumpToSurahAyah,
       playAyahSample,
       togglePlayPause,
       seek,
