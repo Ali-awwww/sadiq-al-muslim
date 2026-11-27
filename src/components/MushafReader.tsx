@@ -40,7 +40,16 @@ import type {
   SearchMatch,
 } from '../types/quran';
 import { ReciterSheet } from './ReciterSheet';
-import { calculateMushafScale, MUSHAF_PAGE_HEIGHT, MUSHAF_PAGE_WIDTH } from '../lib/mushafLayout';
+import {
+  calculateMushafScale,
+  clampValue,
+  computeDragVisualOffset,
+  determineSwipeAxis,
+  evaluateSwipeRelease,
+  MUSHAF_PAGE_HEIGHT,
+  MUSHAF_PAGE_WIDTH,
+  type SwipeAxis,
+} from '../lib/mushafLayout';
 
 interface MushafReaderProps {
   currentPage: number;
@@ -105,7 +114,8 @@ export function MushafReader({
   const [fromCache, setFromCache] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const currentObjectUrlRef = useRef<string | null>(null);
+  const svgObjectUrlMapRef = useRef<Map<number, string>>(new Map());
+  const loadSeqRef = useRef<number>(0);
 
   const [activeModal, setActiveModal] = useState<ModalKind>(null);
   const [indexTab, setIndexTab] = useState<'surah' | 'juz' | 'page'>('surah');
@@ -121,8 +131,9 @@ export function MushafReader({
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchedOnce, setSearchedOnce] = useState(false);
 
-  // Viewport & uniform edge-to-edge layout state
+  // Viewport & DOM-direct gesture state (zero React setState during pointermove)
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const pageStageRef = useRef<HTMLDivElement | null>(null);
   const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>(() => ({
     width: typeof window !== 'undefined' ? window.innerWidth : 390,
     height:
@@ -130,7 +141,11 @@ export function MushafReader({
         ? (window.visualViewport?.height ?? window.innerHeight)
         : 844,
   }));
-  const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const panOffsetRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const isTransitioningRef = useRef<boolean>(false);
+  const transitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const enterTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingEnterOffsetRef = useRef<number | null>(null);
   const dragStartRef = useRef<{
     pointerId: number;
     x: number;
@@ -138,7 +153,9 @@ export function MushafReader({
     startPanX: number;
     startPanY: number;
     t: number;
-    lockedAxis: 'x' | 'y' | null;
+    lockedAxis: SwipeAxis;
+    lastSwipeDeltaX: number;
+    hasFlipped: boolean;
     active: boolean;
   } | null>(null);
 
@@ -248,16 +265,67 @@ export function MushafReader({
   const maxPanX = Math.max(0, (pageWidthPx - viewportSize.width) / 2);
   const maxPanY = Math.max(0, (pageHeightPx - viewportSize.height) / 2);
 
-  useEffect(() => {
-    setPanOffset({ x: 0, y: 0 });
-  }, [currentPage]);
+  const applyStageTransform = useCallback(
+    (x: number, y: number, opacity = 1, transition = 'none') => {
+      const el = pageStageRef.current;
+      if (!el) return;
+      el.style.transition = transition;
+      el.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+      el.style.opacity = String(opacity);
+    },
+    []
+  );
 
-  useEffect(() => {
-    setPanOffset((prev) => ({
-      x: Math.max(-maxPanX, Math.min(maxPanX, prev.x)),
-      y: Math.max(-maxPanY, Math.min(maxPanY, prev.y)),
-    }));
-  }, [maxPanX, maxPanY]);
+  // Handle smooth incoming settle after a swipe flip, or clean instant reset on non-swipe page changes
+  useLayoutEffect(() => {
+    panOffsetRef.current = { x: 0, y: 0 };
+    const enterX = pendingEnterOffsetRef.current;
+    if (enterX !== null) {
+      pendingEnterOffsetRef.current = null;
+      applyStageTransform(enterX, 0, 0.25, 'none');
+
+      if (enterTimerRef.current) {
+        clearTimeout(enterTimerRef.current);
+      }
+
+      let raf1 = 0;
+      let raf2 = 0;
+      raf1 = requestAnimationFrame(() => {
+        raf2 = requestAnimationFrame(() => {
+          applyStageTransform(
+            0,
+            0,
+            1,
+            'transform 170ms cubic-bezier(0.22, 1, 0.36, 1), opacity 170ms ease-out'
+          );
+          enterTimerRef.current = setTimeout(() => {
+            applyStageTransform(0, 0, 1, 'none');
+            isTransitioningRef.current = false;
+            enterTimerRef.current = null;
+          }, 180);
+        });
+      });
+
+      return () => {
+        cancelAnimationFrame(raf1);
+        cancelAnimationFrame(raf2);
+      };
+    }
+
+    if (!dragStartRef.current?.active && !isTransitioningRef.current) {
+      applyStageTransform(0, 0, 1, 'none');
+    }
+  }, [currentPage, applyStageTransform]);
+
+  // Clamp DOM pan offset cleanly when zoom or viewport changes without triggering drag resets
+  useLayoutEffect(() => {
+    const clampedX = clampValue(panOffsetRef.current.x, -maxPanX, maxPanX);
+    const clampedY = clampValue(panOffsetRef.current.y, -maxPanY, maxPanY);
+    panOffsetRef.current = { x: clampedX, y: clampedY };
+    if (!dragStartRef.current?.active && !isTransitioningRef.current) {
+      applyStageTransform(clampedX, clampedY, 1, 'none');
+    }
+  }, [maxPanX, maxPanY, applyStageTransform]);
 
   useEffect(() => {
     setPageJumpInput(String(currentPage));
@@ -288,44 +356,105 @@ export function MushafReader({
     );
   }, [meta, pageStartRef]);
 
-  const loadPageSvg = useCallback(async (page: number) => {
-    setLoading(true);
-    setError(null);
+  const warmPageObjectUrl = useCallback(async (page: number) => {
+    if (page < 1 || page > 604) return;
+    if (svgObjectUrlMapRef.current.has(page)) return;
     try {
       const res = await fetchAndCacheMushafSvg(page);
-      if (currentObjectUrlRef.current) {
-        URL.revokeObjectURL(currentObjectUrlRef.current);
+      if (svgObjectUrlMapRef.current.has(page)) {
+        URL.revokeObjectURL(res.objectUrl);
+      } else {
+        svgObjectUrlMapRef.current.set(page, res.objectUrl);
       }
-      currentObjectUrlRef.current = res.objectUrl;
-      setPageSvgUrl(res.objectUrl);
-      setFromCache(res.fromCache);
-
-      // Background preload adjacent pages (page - 1 and page + 1)
-      void preloadMushafSvg(page - 1);
-      void preloadMushafSvg(page + 1);
-    } catch (err) {
-      setPageSvgUrl(null);
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'تعذر تحميل صفحة المصحف. تحقق من الاتصال بالإنترنت.'
-      );
-    } finally {
-      setLoading(false);
+    } catch {
+      // silent prewarm failure
     }
   }, []);
+
+  const pruneDistantObjectUrls = useCallback((anchorPage: number) => {
+    for (const [p, url] of svgObjectUrlMapRef.current.entries()) {
+      if (Math.abs(p - anchorPage) > 4) {
+        URL.revokeObjectURL(url);
+        svgObjectUrlMapRef.current.delete(p);
+      }
+    }
+  }, []);
+
+  const loadPageSvg = useCallback(
+    async (page: number) => {
+      const seq = ++loadSeqRef.current;
+      setError(null);
+
+      const memoryCachedUrl = svgObjectUrlMapRef.current.get(page);
+      if (memoryCachedUrl) {
+        setPageSvgUrl(memoryCachedUrl);
+        setFromCache(true);
+        setLoading(false);
+        pruneDistantObjectUrls(page);
+        void warmPageObjectUrl(page - 1);
+        void warmPageObjectUrl(page + 1);
+        void preloadMushafSvg(page - 2);
+        void preloadMushafSvg(page + 2);
+        return;
+      }
+
+      setLoading((prev) => prev || !svgObjectUrlMapRef.current.size);
+      try {
+        const res = await fetchAndCacheMushafSvg(page);
+        if (loadSeqRef.current !== seq) {
+          if (!svgObjectUrlMapRef.current.has(page)) {
+            svgObjectUrlMapRef.current.set(page, res.objectUrl);
+          } else {
+            URL.revokeObjectURL(res.objectUrl);
+          }
+          return;
+        }
+        const existing = svgObjectUrlMapRef.current.get(page);
+        if (existing) {
+          URL.revokeObjectURL(res.objectUrl);
+          setPageSvgUrl(existing);
+        } else {
+          svgObjectUrlMapRef.current.set(page, res.objectUrl);
+          setPageSvgUrl(res.objectUrl);
+        }
+        setFromCache(res.fromCache);
+        pruneDistantObjectUrls(page);
+
+        // Warm adjacent pages into memory + Cache API for instant zero-flicker swipes
+        void warmPageObjectUrl(page - 1);
+        void warmPageObjectUrl(page + 1);
+        void preloadMushafSvg(page - 2);
+        void preloadMushafSvg(page + 2);
+      } catch (err) {
+        if (loadSeqRef.current !== seq) return;
+        setPageSvgUrl(null);
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'تعذر تحميل صفحة المصحف. تحقق من الاتصال بالإنترنت.'
+        );
+      } finally {
+        if (loadSeqRef.current === seq) {
+          setLoading(false);
+        }
+      }
+    },
+    [pruneDistantObjectUrls, warmPageObjectUrl]
+  );
 
   useEffect(() => {
     void loadPageSvg(currentPage);
   }, [currentPage, loadPageSvg]);
 
-  // Cleanup object URL on unmount
+  // Cleanup all cached object URLs & transition timers on unmount
   useEffect(() => {
     return () => {
-      if (currentObjectUrlRef.current) {
-        URL.revokeObjectURL(currentObjectUrlRef.current);
-        currentObjectUrlRef.current = null;
+      if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+      if (enterTimerRef.current) clearTimeout(enterTimerRef.current);
+      for (const url of svgObjectUrlMapRef.current.values()) {
+        URL.revokeObjectURL(url);
       }
+      svgObjectUrlMapRef.current.clear();
     };
   }, []);
 
@@ -399,7 +528,7 @@ export function MushafReader({
     const prevAudioPage = prevAudioPageRef.current;
     prevAudioPageRef.current = nextAudioPage;
 
-    if (dragStartRef.current?.active) return;
+    if (dragStartRef.current?.active || isTransitioningRef.current) return;
 
     if (nextAudioPage !== currentPage && nextAudioPage !== prevAudioPage) {
       lastAutoFlippedPageRef.current = nextAudioPage;
@@ -550,7 +679,9 @@ export function MushafReader({
   };
 
   // Pointer pan + swipe / mouse drag handlers (Arabic RTL book: right = next page, left = prev page)
+  // Direct DOM transform updates via pageStageRef avoid React re-renders during drag.
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isTransitioningRef.current) return;
     if (activeModal !== null || reciterSheetOpen) return;
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (dragStartRef.current?.active) return;
@@ -564,30 +695,59 @@ export function MushafReader({
       pointerId: e.pointerId,
       x: e.clientX,
       y: e.clientY,
-      startPanX: panOffset.x,
-      startPanY: panOffset.y,
+      startPanX: panOffsetRef.current.x,
+      startPanY: panOffsetRef.current.y,
       t: Date.now(),
       lockedAxis: null,
+      lastSwipeDeltaX: 0,
+      hasFlipped: false,
       active: true,
     };
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragStartRef.current;
-    if (!drag?.active || drag.pointerId !== e.pointerId) return;
+    if (!drag?.active || drag.pointerId !== e.pointerId || isTransitioningRef.current) return;
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
 
-    if (!drag.lockedAxis && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
-      drag.lockedAxis = Math.abs(dx) >= Math.abs(dy) ? 'x' : 'y';
-    }
+    drag.lockedAxis = determineSwipeAxis(dx, dy, drag.lockedAxis, 8);
+    if (!drag.lockedAxis) return;
 
-    if (maxPanX > 2 || maxPanY > 2) {
-      setPanOffset({
-        x: Math.max(-maxPanX, Math.min(maxPanX, drag.startPanX + dx)),
-        y: Math.max(-maxPanY, Math.min(maxPanY, drag.startPanY + dy)),
-      });
+    const visual = computeDragVisualOffset({
+      dx,
+      dy,
+      lockedAxis: drag.lockedAxis,
+      startPanX: drag.startPanX,
+      startPanY: drag.startPanY,
+      maxPanX,
+      maxPanY,
+      currentPage,
+    });
+
+    panOffsetRef.current = { x: visual.nextPanX, y: visual.nextPanY };
+    drag.lastSwipeDeltaX = visual.swipeDeltaX;
+    applyStageTransform(visual.translateX, visual.translateY, 1, 'none');
+  };
+
+  const finishSwipeCancel = (targetPanX: number, targetPanY: number, hadSwipeOffset: boolean) => {
+    if (!hadSwipeOffset) {
+      applyStageTransform(targetPanX, targetPanY, 1, 'none');
+      return;
     }
+    isTransitioningRef.current = true;
+    applyStageTransform(
+      targetPanX,
+      targetPanY,
+      1,
+      'transform 170ms cubic-bezier(0.22, 1, 0.36, 1)'
+    );
+    if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+    transitionTimerRef.current = setTimeout(() => {
+      applyStageTransform(targetPanX, targetPanY, 1, 'none');
+      isTransitioningRef.current = false;
+      transitionTimerRef.current = null;
+    }, 175);
   };
 
   const handlePointerEnd = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -604,9 +764,11 @@ export function MushafReader({
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
     const dt = Date.now() - drag.t;
-    const startPanX = drag.startPanX;
+    const alreadyFlipped = drag.hasFlipped;
 
     dragStartRef.current = null;
+
+    if (alreadyFlipped || isTransitioningRef.current) return;
 
     // Tap (<10px displacement, <300ms) toggles controls visibility with ~3s auto-hide
     if (Math.abs(dx) < 10 && Math.abs(dy) < 10 && dt < 300) {
@@ -620,30 +782,64 @@ export function MushafReader({
       return;
     }
 
-    // Swipe horizontally flips pages (Arabic RTL book: swipe right = next page, swipe left = prev page)
-    const isMostlyHorizontal = Math.abs(dx) > Math.abs(dy) * 1.15;
-    let shouldFlip = false;
-    if (maxPanX <= 2) {
-      shouldFlip = isMostlyHorizontal && (Math.abs(dx) >= 40 || (Math.abs(dx) >= 28 && dt < 220));
-    } else if (isMostlyHorizontal) {
-      // When zoomed in, allow panning first; flip if swiping past the pan boundary
-      const overscrollRight = startPanX + dx - maxPanX;
-      const overscrollLeft = -maxPanX - (startPanX + dx);
-      if (dx > 0 && overscrollRight >= 44) shouldFlip = true;
-      if (dx < 0 && overscrollLeft >= 44) shouldFlip = true;
+    const finalAxis = determineSwipeAxis(dx, dy, drag.lockedAxis, 8);
+    const finalVisual = computeDragVisualOffset({
+      dx,
+      dy,
+      lockedAxis: finalAxis,
+      startPanX: drag.startPanX,
+      startPanY: drag.startPanY,
+      maxPanX,
+      maxPanY,
+      currentPage,
+    });
+    panOffsetRef.current = { x: finalVisual.nextPanX, y: finalVisual.nextPanY };
+
+    const release = evaluateSwipeRelease({
+      swipeDeltaX: finalVisual.swipeDeltaX,
+      dt,
+      lockedAxis: finalAxis,
+      viewportWidth: viewportSize.width,
+      currentPage,
+    });
+
+    if (release.targetPage === null) {
+      finishSwipeCancel(
+        panOffsetRef.current.x,
+        panOffsetRef.current.y,
+        Math.abs(finalVisual.swipeDeltaX) > 0.5
+      );
+      return;
     }
 
-    if (shouldFlip) {
-      const nextPage =
-        dx > 0 && currentPage < 604
-          ? currentPage + 1
-          : dx < 0 && currentPage > 1
-          ? currentPage - 1
-          : null;
+    // Lock further pointer input until single eased page transition completes
+    drag.hasFlipped = true;
+    isTransitioningRef.current = true;
+    const targetPage = release.targetPage;
+    void warmPageObjectUrl(targetPage);
 
-      if (nextPage !== null) {
-        onChangePage(nextPage);
-      }
+    applyStageTransform(
+      release.exitOffsetX,
+      panOffsetRef.current.y,
+      0.15,
+      'transform 125ms cubic-bezier(0.32, 0, 0.67, 0), opacity 125ms ease-out'
+    );
+
+    if (transitionTimerRef.current) clearTimeout(transitionTimerRef.current);
+    transitionTimerRef.current = setTimeout(() => {
+      transitionTimerRef.current = null;
+      pendingEnterOffsetRef.current = release.enterOffsetX;
+      onChangePage(targetPage);
+    }, 125);
+  };
+
+  const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragStartRef.current;
+    if (!drag?.active || drag.pointerId !== e.pointerId) return;
+    const hadSwipeOffset = Math.abs(drag.lastSwipeDeltaX) > 0.5;
+    dragStartRef.current = null;
+    if (!isTransitioningRef.current) {
+      finishSwipeCancel(panOffsetRef.current.x, panOffsetRef.current.y, hadSwipeOffset);
     }
   };
 
@@ -879,29 +1075,23 @@ export function MushafReader({
         </div>
       </header>
 
-      {/* Authentic Madani Mushaf SVG Page Canvas: Edge-to-edge uniform scaling with fixed center reference */}
+      {/* Authentic Madani Mushaf SVG Page Canvas: Edge-to-edge uniform scaling with DOM-direct swipe/pan */}
       <main
         ref={viewportRef}
         dir="ltr"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerEnd}
-        onPointerCancel={(e) => {
-          if (dragStartRef.current?.pointerId === e.pointerId) {
-            dragStartRef.current = null;
-          }
-        }}
+        onPointerCancel={handlePointerCancel}
         className="w-full h-full touch-none select-none cursor-grab active:cursor-grabbing bg-[#FAF6EC] overflow-hidden flex items-center justify-center"
       >
         <div
+          ref={pageStageRef}
           className="relative shrink-0 flex items-center justify-center bg-[#FAF6EC]"
           style={{
             width: `${pageWidthPx}px`,
             height: `${pageHeightPx}px`,
-            transform:
-              panOffset.x !== 0 || panOffset.y !== 0
-                ? `translate3d(${panOffset.x}px, ${panOffset.y}px, 0)`
-                : undefined,
+            willChange: 'transform, opacity',
           }}
         >
           {loading && !pageSvgUrl ? (
