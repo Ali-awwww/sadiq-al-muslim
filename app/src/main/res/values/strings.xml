@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">صديق المسلم</string>
+    <string name="tab_mushaf">المصحف</string>
+    <string name="tab_reciters">القرّاء</string>
+    <string name="tab_understanding">التفسير والحفظ</string>
+    <string name="tab_khatma">الختمة</string>
+    <string name="tab_settings">الإعدادات</string>
+    <string name="notification_channel_wird_name">تذكير الورد اليومي</string>
+    <string name="notification_channel_wird_desc">تنبيهات يومية لقراءة الورد القرآني</string>
+</resources>

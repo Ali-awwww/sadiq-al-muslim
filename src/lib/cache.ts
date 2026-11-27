@@ -1,8 +1,8 @@
 const DB_NAME = 'sadiq-al-muslim-db';
 const STORE_NAME = 'kv';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 export const AUDIO_CACHE_NAME = 'sadiq-audio-v1';
-export const MUSHAF_SVG_CACHE_NAME = 'sadiq-mushaf-svg-v1';
+export const MUSHAF_SVG_CACHE_NAME = 'sadiq-mushaf-svg-v2';
 export const ALFURQAN_SVG_PAGE_BASE = 'https://alfurqan.online/api/v1/quran-text/page';
 
 let dbPromise: Promise<IDBDatabase | null> | null = null;
@@ -146,6 +146,7 @@ export async function clearAllCaches(): Promise<void> {
     try {
       await caches.delete(AUDIO_CACHE_NAME);
       await caches.delete(MUSHAF_SVG_CACHE_NAME);
+      await caches.delete('sadiq-mushaf-svg-v1');
     } catch {
       // ignore
     }
@@ -157,12 +158,127 @@ export function getMushafSvgRemoteUrl(page: number): string {
   return `${ALFURQAN_SVG_PAGE_BASE}/${safePage}`;
 }
 
-function extractSvgSubpathBBox(d: string): {
+const MUSHAF_TARGET_ASPECT_RATIO = 510.236 / 729.448;
+
+type SvgBBox = {
   minX: number;
   maxX: number;
   minY: number;
   maxY: number;
-} | null {
+};
+
+type Matrix2D = [number, number, number, number, number, number];
+
+const IDENTITY_MATRIX: Matrix2D = [1, 0, 0, 1, 0, 0];
+
+function multiplyMatrices(m1: Matrix2D, m2: Matrix2D): Matrix2D {
+  return [
+    m1[0] * m2[0] + m1[2] * m2[1],
+    m1[1] * m2[0] + m1[3] * m2[1],
+    m1[0] * m2[2] + m1[2] * m2[3],
+    m1[1] * m2[2] + m1[3] * m2[3],
+    m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
+    m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
+  ];
+}
+
+function parseSvgTransform(transformStr: string | null | undefined): Matrix2D {
+  let result: Matrix2D = IDENTITY_MATRIX;
+  if (!transformStr) return result;
+
+  const fnRegex = /(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]+)\)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = fnRegex.exec(transformStr)) !== null) {
+    const fn = match[1].toLowerCase();
+    const nums = match[2]
+      .trim()
+      .split(/[\s,]+/)
+      .map(Number)
+      .filter((n) => Number.isFinite(n));
+    let local: Matrix2D = IDENTITY_MATRIX;
+
+    if (fn === 'matrix' && nums.length >= 6) {
+      local = [nums[0], nums[1], nums[2], nums[3], nums[4], nums[5]];
+    } else if (fn === 'translate' && nums.length >= 1) {
+      local = [1, 0, 0, 1, nums[0], nums[1] ?? 0];
+    } else if (fn === 'scale' && nums.length >= 1) {
+      local = [nums[0], 0, 0, nums[1] ?? nums[0], 0, 0];
+    } else if (fn === 'rotate' && nums.length >= 1) {
+      const rad = (nums[0] * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      if (nums.length >= 3) {
+        const cx = nums[1];
+        const cy = nums[2];
+        local = multiplyMatrices(
+          [1, 0, 0, 1, cx, cy],
+          multiplyMatrices([cos, sin, -sin, cos, 0, 0], [1, 0, 0, 1, -cx, -cy])
+        );
+      } else {
+        local = [cos, sin, -sin, cos, 0, 0];
+      }
+    } else if (fn === 'skewx' && nums.length >= 1) {
+      local = [1, 0, Math.tan((nums[0] * Math.PI) / 180), 1, 0, 0];
+    } else if (fn === 'skewy' && nums.length >= 1) {
+      local = [1, Math.tan((nums[0] * Math.PI) / 180), 0, 1, 0, 0];
+    }
+
+    result = multiplyMatrices(result, local);
+  }
+  return result;
+}
+
+function cubicExtrema1D(p0: number, p1: number, p2: number, p3: number): [number, number] {
+  let min = Math.min(p0, p3);
+  let max = Math.max(p0, p3);
+
+  const a = 3 * (-p0 + 3 * p1 - 3 * p2 + p3);
+  const b = 6 * (p0 - 2 * p1 + p2);
+  const c = 3 * (p1 - p0);
+
+  const roots: number[] = [];
+  if (Math.abs(a) < 1e-12) {
+    if (Math.abs(b) > 1e-12) roots.push(-c / b);
+  } else {
+    const disc = b * b - 4 * a * c;
+    if (disc >= 0) {
+      const s = Math.sqrt(disc);
+      roots.push((-b + s) / (2 * a), (-b - s) / (2 * a));
+    }
+  }
+
+  for (const t of roots) {
+    if (t > 0 && t < 1) {
+      const mt = 1 - t;
+      const v =
+        mt * mt * mt * p0 +
+        3 * mt * mt * t * p1 +
+        3 * mt * t * t * p2 +
+        t * t * t * p3;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  return [min, max];
+}
+
+function quadExtrema1D(p0: number, p1: number, p2: number): [number, number] {
+  let min = Math.min(p0, p2);
+  let max = Math.max(p0, p2);
+  const denom = p0 - 2 * p1 + p2;
+  if (Math.abs(denom) > 1e-12) {
+    const t = (p0 - p1) / denom;
+    if (t > 0 && t < 1) {
+      const mt = 1 - t;
+      const v = mt * mt * p0 + 2 * mt * t * p1 + t * t * p2;
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  }
+  return [min, max];
+}
+
+function extractSvgPathBBox(d: string): SvgBBox | null {
   const tokens = d.match(/[a-zA-Z]|[-+]?(?:\d*\.\d+|\d+)(?:[eE][-+]?\d+)?/g);
   if (!tokens || tokens.length === 0) return null;
 
@@ -171,6 +287,11 @@ function extractSvgSubpathBBox(d: string): {
   let cy = 0;
   let sx = 0;
   let sy = 0;
+  let lastC2x = 0;
+  let lastC2y = 0;
+  let lastQx = 0;
+  let lastQy = 0;
+  let prevCmd = '';
   let cmd = '';
   let minX = Infinity;
   let maxX = -Infinity;
@@ -178,10 +299,16 @@ function extractSvgSubpathBBox(d: string): {
   let maxY = -Infinity;
 
   const pushPt = (x: number, y: number) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     if (x < minX) minX = x;
     if (x > maxX) maxX = x;
     if (y < minY) minY = y;
     if (y > maxY) maxY = y;
+  };
+
+  const nextNum = (): number => {
+    const v = parseFloat(tokens[i++]);
+    return Number.isFinite(v) ? v : 0;
   };
 
   while (i < tokens.length) {
@@ -190,10 +317,11 @@ function extractSvgSubpathBBox(d: string): {
       if (cmd === 'Z' || cmd === 'z') {
         cx = sx;
         cy = sy;
+        prevCmd = cmd;
       }
       continue;
     }
-    const nextNum = () => parseFloat(tokens[i++]);
+
     if (cmd === 'M' || cmd === 'L') {
       cx = nextNum();
       cy = nextNum();
@@ -203,6 +331,7 @@ function extractSvgSubpathBBox(d: string): {
         cmd = 'L';
       }
       pushPt(cx, cy);
+      prevCmd = cmd;
     } else if (cmd === 'm' || cmd === 'l') {
       cx += nextNum();
       cy += nextNum();
@@ -212,18 +341,103 @@ function extractSvgSubpathBBox(d: string): {
         cmd = 'l';
       }
       pushPt(cx, cy);
+      prevCmd = cmd;
     } else if (cmd === 'H') {
       cx = nextNum();
       pushPt(cx, cy);
+      prevCmd = cmd;
     } else if (cmd === 'h') {
       cx += nextNum();
       pushPt(cx, cy);
+      prevCmd = cmd;
     } else if (cmd === 'V') {
       cy = nextNum();
       pushPt(cx, cy);
+      prevCmd = cmd;
     } else if (cmd === 'v') {
       cy += nextNum();
       pushPt(cx, cy);
+      prevCmd = cmd;
+    } else if (cmd === 'C' || cmd === 'c') {
+      const rel = cmd === 'c';
+      const x1 = (rel ? cx : 0) + nextNum();
+      const y1 = (rel ? cy : 0) + nextNum();
+      const x2 = (rel ? cx : 0) + nextNum();
+      const y2 = (rel ? cy : 0) + nextNum();
+      const x = (rel ? cx : 0) + nextNum();
+      const y = (rel ? cy : 0) + nextNum();
+      const [ex0, ex1] = cubicExtrema1D(cx, x1, x2, x);
+      const [ey0, ey1] = cubicExtrema1D(cy, y1, y2, y);
+      pushPt(ex0, ey0);
+      pushPt(ex1, ey1);
+      lastC2x = x2;
+      lastC2y = y2;
+      cx = x;
+      cy = y;
+      prevCmd = cmd;
+    } else if (cmd === 'S' || cmd === 's') {
+      const rel = cmd === 's';
+      const hasPrevC = prevCmd === 'C' || prevCmd === 'c' || prevCmd === 'S' || prevCmd === 's';
+      const x1 = hasPrevC ? 2 * cx - lastC2x : cx;
+      const y1 = hasPrevC ? 2 * cy - lastC2y : cy;
+      const x2 = (rel ? cx : 0) + nextNum();
+      const y2 = (rel ? cy : 0) + nextNum();
+      const x = (rel ? cx : 0) + nextNum();
+      const y = (rel ? cy : 0) + nextNum();
+      const [ex0, ex1] = cubicExtrema1D(cx, x1, x2, x);
+      const [ey0, ey1] = cubicExtrema1D(cy, y1, y2, y);
+      pushPt(ex0, ey0);
+      pushPt(ex1, ey1);
+      lastC2x = x2;
+      lastC2y = y2;
+      cx = x;
+      cy = y;
+      prevCmd = cmd;
+    } else if (cmd === 'Q' || cmd === 'q') {
+      const rel = cmd === 'q';
+      const x1 = (rel ? cx : 0) + nextNum();
+      const y1 = (rel ? cy : 0) + nextNum();
+      const x = (rel ? cx : 0) + nextNum();
+      const y = (rel ? cy : 0) + nextNum();
+      const [ex0, ex1] = quadExtrema1D(cx, x1, x);
+      const [ey0, ey1] = quadExtrema1D(cy, y1, y);
+      pushPt(ex0, ey0);
+      pushPt(ex1, ey1);
+      lastQx = x1;
+      lastQy = y1;
+      cx = x;
+      cy = y;
+      prevCmd = cmd;
+    } else if (cmd === 'T' || cmd === 't') {
+      const rel = cmd === 't';
+      const hasPrevQ = prevCmd === 'Q' || prevCmd === 'q' || prevCmd === 'T' || prevCmd === 't';
+      const x1 = hasPrevQ ? 2 * cx - lastQx : cx;
+      const y1 = hasPrevQ ? 2 * cy - lastQy : cy;
+      const x = (rel ? cx : 0) + nextNum();
+      const y = (rel ? cy : 0) + nextNum();
+      const [ex0, ex1] = quadExtrema1D(cx, x1, x);
+      const [ey0, ey1] = quadExtrema1D(cy, y1, y);
+      pushPt(ex0, ey0);
+      pushPt(ex1, ey1);
+      lastQx = x1;
+      lastQy = y1;
+      cx = x;
+      cy = y;
+      prevCmd = cmd;
+    } else if (cmd === 'A' || cmd === 'a') {
+      const rel = cmd === 'a';
+      nextNum();
+      nextNum();
+      nextNum();
+      nextNum();
+      nextNum();
+      const x = (rel ? cx : 0) + nextNum();
+      const y = (rel ? cy : 0) + nextNum();
+      pushPt(cx, cy);
+      pushPt(x, y);
+      cx = x;
+      cy = y;
+      prevCmd = cmd;
     } else {
       i++;
     }
@@ -233,81 +447,320 @@ function extractSvgSubpathBBox(d: string): {
   return { minX, maxX, minY, maxY };
 }
 
+function getAttrValue(attrs: string, name: string): string | null {
+  const re = new RegExp(`(?:^|\\s)${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i');
+  const m = attrs.match(re);
+  return m ? (m[1] ?? m[2] ?? '') : null;
+}
+
+function getStyleProp(style: string | null, prop: string): string | null {
+  if (!style) return null;
+  const re = new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*([^;]+)`, 'i');
+  const m = style.match(re);
+  return m ? m[1].trim().toLowerCase() : null;
+}
+
+function isHiddenOrBackgroundElement(
+  attrs: string,
+  transformedW: number,
+  transformedH: number,
+  origW: number,
+  origH: number
+): boolean {
+  const style = getAttrValue(attrs, 'style');
+  const display = getStyleProp(style, 'display') ?? getAttrValue(attrs, 'display')?.toLowerCase();
+  const visibility =
+    getStyleProp(style, 'visibility') ?? getAttrValue(attrs, 'visibility')?.toLowerCase();
+  const opacity = getStyleProp(style, 'opacity') ?? getAttrValue(attrs, 'opacity');
+  if (display === 'none' || visibility === 'hidden' || opacity === '0') {
+    return true;
+  }
+
+  const fill = (getStyleProp(style, 'fill') ?? getAttrValue(attrs, 'fill') ?? '').toLowerCase();
+  const stroke = (
+    getStyleProp(style, 'stroke') ??
+    getAttrValue(attrs, 'stroke') ??
+    ''
+  ).toLowerCase();
+
+  if (fill === 'none' && (stroke === '' || stroke === 'none')) {
+    return true;
+  }
+
+  const coversWholeCanvas = transformedW >= origW * 0.98 && transformedH >= origH * 0.98;
+  if (
+    coversWholeCanvas &&
+    (fill === '#ffffff' ||
+      fill === '#fff' ||
+      fill === 'white' ||
+      fill === 'rgb(255,255,255)' ||
+      fill === 'none') &&
+    (stroke === '' || stroke === 'none')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+const SVG_SKIP_CONTAINERS = new Set([
+  'defs',
+  'clippath',
+  'mask',
+  'pattern',
+  'symbol',
+  'metadata',
+  'style',
+  'script',
+]);
+
+function computeSvgContentBBox(
+  svgText: string,
+  origW: number,
+  origH: number
+): SvgBBox | null {
+  const skipStack: string[] = [];
+  const transformStack: Matrix2D[] = [IDENTITY_MATRIX];
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+
+  const tagRegex = /<(\/?)([a-zA-Z0-9:_-]+)([^>]*?)(\/?)>/g;
+  let tagMatch: RegExpExecArray | null;
+
+  while ((tagMatch = tagRegex.exec(svgText)) !== null) {
+    const isClose = tagMatch[1] === '/';
+    const rawName = tagMatch[2];
+    const name = rawName.toLowerCase();
+    const attrs = tagMatch[3];
+    const selfClose = tagMatch[4] === '/';
+
+    if (isClose) {
+      if (SVG_SKIP_CONTAINERS.has(name) && skipStack.length > 0 && skipStack[skipStack.length - 1] === name) {
+        skipStack.pop();
+      } else if (skipStack.length === 0 && name === 'g' && transformStack.length > 1) {
+        transformStack.pop();
+      }
+      continue;
+    }
+
+    if (SVG_SKIP_CONTAINERS.has(name)) {
+      if (!selfClose) {
+        skipStack.push(name);
+      }
+      continue;
+    }
+
+    if (skipStack.length > 0) {
+      continue;
+    }
+
+    const parentMatrix = transformStack[transformStack.length - 1];
+    const localTransform = getAttrValue(attrs, 'transform');
+    const currentMatrix = localTransform
+      ? multiplyMatrices(parentMatrix, parseSvgTransform(localTransform))
+      : parentMatrix;
+
+    if (name === 'g' || name === 'svg') {
+      if (!selfClose && name === 'g') {
+        transformStack.push(currentMatrix);
+      }
+      continue;
+    }
+
+    let localBox: SvgBBox | null = null;
+
+    if (name === 'path') {
+      const d = getAttrValue(attrs, 'd');
+      if (d) {
+        localBox = extractSvgPathBBox(d);
+      }
+    } else if (name === 'rect') {
+      const x = parseFloat(getAttrValue(attrs, 'x') ?? '0');
+      const y = parseFloat(getAttrValue(attrs, 'y') ?? '0');
+      const w = parseFloat(getAttrValue(attrs, 'width') ?? '0');
+      const h = parseFloat(getAttrValue(attrs, 'height') ?? '0');
+      if (Number.isFinite(x) && Number.isFinite(y) && w > 0 && h > 0) {
+        localBox = { minX: x, maxX: x + w, minY: y, maxY: y + h };
+      }
+    } else if (name === 'circle') {
+      const cx = parseFloat(getAttrValue(attrs, 'cx') ?? '0');
+      const cy = parseFloat(getAttrValue(attrs, 'cy') ?? '0');
+      const r = parseFloat(getAttrValue(attrs, 'r') ?? '0');
+      if (Number.isFinite(cx) && Number.isFinite(cy) && r > 0) {
+        localBox = { minX: cx - r, maxX: cx + r, minY: cy - r, maxY: cy + r };
+      }
+    } else if (name === 'ellipse') {
+      const cx = parseFloat(getAttrValue(attrs, 'cx') ?? '0');
+      const cy = parseFloat(getAttrValue(attrs, 'cy') ?? '0');
+      const rx = parseFloat(getAttrValue(attrs, 'rx') ?? '0');
+      const ry = parseFloat(getAttrValue(attrs, 'ry') ?? '0');
+      if (Number.isFinite(cx) && Number.isFinite(cy) && rx > 0 && ry > 0) {
+        localBox = { minX: cx - rx, maxX: cx + rx, minY: cy - ry, maxY: cy + ry };
+      }
+    } else if (name === 'line') {
+      const x1 = parseFloat(getAttrValue(attrs, 'x1') ?? '0');
+      const y1 = parseFloat(getAttrValue(attrs, 'y1') ?? '0');
+      const x2 = parseFloat(getAttrValue(attrs, 'x2') ?? '0');
+      const y2 = parseFloat(getAttrValue(attrs, 'y2') ?? '0');
+      if (
+        Number.isFinite(x1) &&
+        Number.isFinite(y1) &&
+        Number.isFinite(x2) &&
+        Number.isFinite(y2)
+      ) {
+        localBox = {
+          minX: Math.min(x1, x2),
+          maxX: Math.max(x1, x2),
+          minY: Math.min(y1, y2),
+          maxY: Math.max(y1, y2),
+        };
+      }
+    } else if (name === 'polygon' || name === 'polyline') {
+      const pts = (getAttrValue(attrs, 'points') ?? '')
+        .trim()
+        .split(/[\s,]+/)
+        .map(Number);
+      if (pts.length >= 2) {
+        let pMinX = Infinity;
+        let pMaxX = -Infinity;
+        let pMinY = Infinity;
+        let pMaxY = -Infinity;
+        for (let k = 0; k + 1 < pts.length; k += 2) {
+          const px = pts[k];
+          const py = pts[k + 1];
+          if (Number.isFinite(px) && Number.isFinite(py)) {
+            if (px < pMinX) pMinX = px;
+            if (px > pMaxX) pMaxX = px;
+            if (py < pMinY) pMinY = py;
+            if (py > pMaxY) pMaxY = py;
+          }
+        }
+        if (Number.isFinite(pMinX) && Number.isFinite(pMinY)) {
+          localBox = { minX: pMinX, maxX: pMaxX, minY: pMinY, maxY: pMaxY };
+        }
+      }
+    }
+
+    if (!localBox) continue;
+
+    const corners: [number, number][] = [
+      [localBox.minX, localBox.minY],
+      [localBox.maxX, localBox.minY],
+      [localBox.minX, localBox.maxY],
+      [localBox.maxX, localBox.maxY],
+    ];
+
+    let elMinX = Infinity;
+    let elMaxX = -Infinity;
+    let elMinY = Infinity;
+    let elMaxY = -Infinity;
+    for (const [lx, ly] of corners) {
+      const tx = currentMatrix[0] * lx + currentMatrix[2] * ly + currentMatrix[4];
+      const ty = currentMatrix[1] * lx + currentMatrix[3] * ly + currentMatrix[5];
+      if (tx < elMinX) elMinX = tx;
+      if (tx > elMaxX) elMaxX = tx;
+      if (ty < elMinY) elMinY = ty;
+      if (ty > elMaxY) elMaxY = ty;
+    }
+
+    if (
+      !Number.isFinite(elMinX) ||
+      !Number.isFinite(elMaxX) ||
+      !Number.isFinite(elMinY) ||
+      !Number.isFinite(elMaxY)
+    ) {
+      continue;
+    }
+
+    if (isHiddenOrBackgroundElement(attrs, elMaxX - elMinX, elMaxY - elMinY, origW, origH)) {
+      continue;
+    }
+
+    if (elMinX < minX) minX = elMinX;
+    if (elMaxX > maxX) maxX = elMaxX;
+    if (elMinY < minY) minY = elMinY;
+    if (elMaxY > maxY) maxY = elMaxY;
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+  return { minX, maxX, minY, maxY };
+}
+
 /**
- * Pages 1 & 2 from Al-Furqan wrap their entire green ornamental border inside
- * `clipPath26` (212x299pt centered inside 383x547pt), leaving ~45% blank padding
- * inside the SVG's own 510x729 viewBox. Tightening the viewBox to that outer
- * frame (while preserving the 510.236/729.448 aspect ratio and keeping a small
- * safety margin) lets the page fill the full available viewport height cleanly.
+ * Tightens any Al-Furqan Mushaf SVG's viewBox to the true bounding box of its
+ * drawn content (green ornamental frame + text/headers), while preserving the
+ * 510.236/729.448 aspect ratio centered on the content with a small safety
+ * margin. Falls back to the original SVG unchanged if no valid content box
+ * can be computed.
  */
 export function normalizeMushafSvgViewBox(svgText: string): string {
-  const svgOpenMatch = svgText.match(/<svg\b[^>]*>/);
-  if (!svgOpenMatch) return svgText;
+  try {
+    const svgOpenMatch = svgText.match(/<svg\b[^>]*>/);
+    if (!svgOpenMatch) return svgText;
 
-  const vbMatch = svgOpenMatch[0].match(
-    /\bviewBox\s*=\s*"\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*"/
-  );
-  if (!vbMatch) return svgText;
+    const vbAttrMatch = svgOpenMatch[0].match(/\bviewBox\s*=\s*(?:"([^"]*)"|'([^']*)')/);
+    if (!vbAttrMatch) return svgText;
 
-  const origW = parseFloat(vbMatch[3]);
-  const origH = parseFloat(vbMatch[4]);
-  if (!(origW > 0 && origH > 0)) return svgText;
+    const vbParts = (vbAttrMatch[1] ?? vbAttrMatch[2] ?? '')
+      .trim()
+      .split(/[\s,]+/)
+      .map(Number);
+    if (vbParts.length !== 4 || vbParts.some((n) => !Number.isFinite(n))) {
+      return svgText;
+    }
 
-  // Detect outer page-frame clipPath26 used on pages 1 & 2
-  const clipMatch = svgText.match(
-    /<clipPath\b[^>]*\bid="clipPath26"[^>]*>[\s\S]*?<path\b[^>]*\bd="([^"]+)"/
-  );
-  if (!clipMatch) return svgText;
+    const origW = vbParts[2];
+    const origH = vbParts[3];
+    if (!(origW > 0 && origH > 0)) return svgText;
 
-  const ptBox = extractSvgSubpathBBox(clipMatch[1]);
-  if (!ptBox) return svgText;
+    const contentBox = computeSvgContentBBox(svgText, origW, origH);
+    if (!contentBox) return svgText;
 
-  // Read root Inkscape PDF-to-SVG matrix transform (typically 4/3, 0, 0, -4/3, 0, 729.448)
-  const rootMatrixMatch = svgText.match(
-    /<g\b[^>]*\bid="g10"[^>]*\btransform="matrix\(([-\d.eE]+),([-\d.eE]+),([-\d.eE]+),([-\d.eE]+),([-\d.eE]+),([-\d.eE]+)\)"/
-  );
-  const sx = rootMatrixMatch ? parseFloat(rootMatrixMatch[1]) : 1.3333333;
-  const sy = rootMatrixMatch ? parseFloat(rootMatrixMatch[4]) : -1.3333333;
-  const tx = rootMatrixMatch ? parseFloat(rootMatrixMatch[5]) : 0;
-  const ty = rootMatrixMatch ? parseFloat(rootMatrixMatch[6]) : origH;
+    const frameW = contentBox.maxX - contentBox.minX;
+    const frameH = contentBox.maxY - contentBox.minY;
+    if (!(frameW >= 150 && frameH >= 200)) {
+      return svgText;
+    }
 
-  const x1 = ptBox.minX * sx + tx;
-  const x2 = ptBox.maxX * sx + tx;
-  const y1 = ptBox.minY * sy + ty;
-  const y2 = ptBox.maxY * sy + ty;
+    const pad = 2;
+    let cropW = frameW + pad * 2;
+    let cropH = cropW / MUSHAF_TARGET_ASPECT_RATIO;
+    if (cropH < frameH + pad * 2) {
+      cropH = frameH + pad * 2;
+      cropW = cropH * MUSHAF_TARGET_ASPECT_RATIO;
+    }
 
-  const frameMinX = Math.min(x1, x2);
-  const frameMaxX = Math.max(x1, x2);
-  const frameMinY = Math.min(y1, y2);
-  const frameMaxY = Math.max(y1, y2);
-  const frameW = frameMaxX - frameMinX;
-  const frameH = frameMaxY - frameMinY;
+    // Skip if already as tight as (or larger than) current viewBox
+    if (cropW >= origW - 1 && cropH >= origH - 1) {
+      return svgText;
+    }
 
-  // Only normalize if this is a full-frame decorative box significantly smaller than the canvas
-  if (frameW < 150 || frameH < 200 || (frameW > origW * 0.85 && frameH > origH * 0.85)) {
+    const centerX = (contentBox.minX + contentBox.maxX) / 2;
+    const centerY = (contentBox.minY + contentBox.maxY) / 2;
+    const cropX = centerX - cropW / 2;
+    const cropY = centerY - cropH / 2;
+
+    if (
+      !Number.isFinite(cropX) ||
+      !Number.isFinite(cropY) ||
+      !Number.isFinite(cropW) ||
+      !Number.isFinite(cropH) ||
+      !(cropW > 0 && cropH > 0)
+    ) {
+      return svgText;
+    }
+
+    const newViewBox = `${cropX.toFixed(2)} ${cropY.toFixed(2)} ${cropW.toFixed(2)} ${cropH.toFixed(2)}`;
+    const updatedSvgOpen = svgOpenMatch[0].replace(
+      /\bviewBox\s*=\s*(?:"[^"]*"|'[^']*')/,
+      `viewBox="${newViewBox}"`
+    );
+    return svgText.replace(svgOpenMatch[0], updatedSvgOpen);
+  } catch {
     return svgText;
   }
-
-  const targetRatio = origW / origH;
-  const padX = 2;
-  let cropW = frameW + padX * 2;
-  let cropH = cropW / targetRatio;
-  if (cropH < frameH + 4) {
-    cropH = frameH + 4;
-    cropW = cropH * targetRatio;
-  }
-
-  const centerX = (frameMinX + frameMaxX) / 2;
-  const centerY = (frameMinY + frameMaxY) / 2;
-  const cropX = Math.max(0, centerX - cropW / 2);
-  const cropY = Math.max(0, centerY - cropH / 2);
-
-  const newViewBox = `${cropX.toFixed(2)} ${cropY.toFixed(2)} ${cropW.toFixed(2)} ${cropH.toFixed(2)}`;
-  const updatedSvgOpen = svgOpenMatch[0].replace(
-    /\bviewBox\s*=\s*"[^"]*"/,
-    `viewBox="${newViewBox}"`
-  );
-  return svgText.replace(svgOpenMatch[0], updatedSvgOpen);
 }
 
 export async function fetchAndCacheMushafSvg(
@@ -315,7 +768,7 @@ export async function fetchAndCacheMushafSvg(
 ): Promise<{ objectUrl: string; fromCache: boolean }> {
   const safePage = Math.max(1, Math.min(604, Math.floor(page)));
   const url = getMushafSvgRemoteUrl(safePage);
-  const idbKey = `mushaf_svg_page_${safePage}`;
+  const idbKey = `mushaf_svg_v2_page_${safePage}`;
 
   // 1. Check Cache API first
   if (typeof caches !== 'undefined') {
@@ -382,7 +835,7 @@ export async function fetchAndCacheMushafSvg(
 export async function preloadMushafSvg(page: number): Promise<void> {
   if (page < 1 || page > 604) return;
   const url = getMushafSvgRemoteUrl(page);
-  const idbKey = `mushaf_svg_page_${page}`;
+  const idbKey = `mushaf_svg_v2_page_${page}`;
 
   try {
     if (typeof caches !== 'undefined') {
