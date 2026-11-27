@@ -272,3 +272,176 @@ export function evaluateSwipeRelease(
     enterOffsetX: 0,
   };
 }
+
+export interface PageMenuItem {
+  id: 'surah' | 'page_display' | 'jump';
+  title: string;
+}
+
+export const PAGE_MENU_ITEMS: readonly PageMenuItem[] = [
+  { id: 'surah', title: 'السورة والجزء' },
+  { id: 'page_display', title: 'الصفحة الحالية' },
+  { id: 'jump', title: 'الانتقال إلى صفحة' },
+] as const;
+
+export interface AyahHighlightRect {
+  topPercent: number;
+  leftPercent: number;
+  widthPercent: number;
+  heightPercent: number;
+  surahNumber: number;
+  ayahNumberInSurah: number;
+}
+
+export interface AyahLayoutInput {
+  number: number;
+  numberInSurah: number;
+  text?: string;
+  surahNumber?: number;
+}
+
+export interface ComputeAyahHighlightParams {
+  page: number;
+  surahNumber: number;
+  ayahNumberInSurah: number;
+  globalAyahNumber?: number;
+  ayahsOnPage?: AyahLayoutInput[] | null;
+  pageStartSurah?: number;
+  pageStartAyah?: number;
+  nextPageStartSurah?: number;
+  nextPageStartAyah?: number;
+}
+
+export function computeAyahHighlightRect(
+  params: ComputeAyahHighlightParams
+): AyahHighlightRect | null {
+  const {
+    page,
+    surahNumber,
+    ayahNumberInSurah,
+    globalAyahNumber,
+    ayahsOnPage,
+    pageStartSurah,
+    pageStartAyah,
+    nextPageStartSurah,
+    nextPageStartAyah,
+  } = params;
+
+  if (page < 1 || page > 604 || surahNumber < 1 || surahNumber > 114 || ayahNumberInSurah < 1) {
+    return null;
+  }
+
+  // Madani Mushaf layout bounds
+  const isOpeningSpread = page === 1 || page === 2;
+  const contentTop = isOpeningSpread ? 26.0 : 9.2;
+  const contentHeight = isOpeningSpread ? 47.0 : 82.2;
+  const contentLeft = isOpeningSpread ? 16.5 : 7.5;
+  const contentWidth = isOpeningSpread ? 67.0 : 85.0;
+  const minLineHeight = isOpeningSpread ? 6.5 : 5.2;
+
+  // Case 1: Accurate layout using current page ayahs text lengths and surah header banners
+  if (ayahsOnPage && ayahsOnPage.length > 0) {
+    const matchIndex = ayahsOnPage.findIndex((a) => {
+      if (globalAyahNumber !== undefined && a.number === globalAyahNumber) {
+        return true;
+      }
+      const sNum = a.surahNumber ?? surahNumber;
+      return sNum === surahNumber && a.numberInSurah === ayahNumberInSurah;
+    });
+
+    if (matchIndex !== -1) {
+      const weights: number[] = [];
+      const headerWeights: number[] = [];
+
+      for (let i = 0; i < ayahsOnPage.length; i++) {
+        const a = ayahsOnPage[i];
+        const sNum = a.surahNumber ?? surahNumber;
+        // Decorative Surah title banner & Basmala occupy vertical space on the page
+        const hasSurahHeader =
+          !isOpeningSpread &&
+          a.numberInSurah === 1 &&
+          sNum !== 1 &&
+          sNum !== 9;
+
+        headerWeights.push(hasSurahHeader ? 90 : 0);
+        weights.push(Math.max(20, (a.text || '').length));
+      }
+
+      let totalWeight = 0;
+      for (let i = 0; i < ayahsOnPage.length; i++) {
+        totalWeight += headerWeights[i] + weights[i];
+      }
+      if (totalWeight <= 0) totalWeight = 1;
+
+      let cumulativeBefore = 0;
+      for (let i = 0; i < matchIndex; i++) {
+        cumulativeBefore += headerWeights[i] + weights[i];
+      }
+      cumulativeBefore += headerWeights[matchIndex];
+
+      const matchWeight = weights[matchIndex];
+      const startFrac = Math.max(0, Math.min(1, cumulativeBefore / totalWeight));
+      const spanFrac = Math.max(0, Math.min(1, matchWeight / totalWeight));
+
+      const rawTop = contentTop + startFrac * contentHeight;
+      const rawHeight = spanFrac * contentHeight;
+      const heightPercent = Math.max(minLineHeight, rawHeight);
+      const maxTop = contentTop + contentHeight - heightPercent;
+      const topPercent = Math.min(Math.max(contentTop, rawTop), Math.max(contentTop, maxTop));
+
+      return {
+        topPercent,
+        leftPercent: contentLeft,
+        widthPercent: contentWidth,
+        heightPercent,
+        surahNumber,
+        ayahNumberInSurah,
+      };
+    }
+    // If not found in ayahsOnPage (e.g. stale data from another page), fall through to Case 2!
+  }
+
+  // Case 2: Fast proportional estimation from page meta before ayahs are fetched
+  if (pageStartSurah !== undefined && pageStartAyah !== undefined) {
+    if (surahNumber < pageStartSurah) return null;
+    if (nextPageStartSurah !== undefined && surahNumber > nextPageStartSurah) return null;
+    if (surahNumber === pageStartSurah && ayahNumberInSurah < pageStartAyah) return null;
+    if (
+      nextPageStartSurah !== undefined &&
+      nextPageStartAyah !== undefined &&
+      surahNumber === nextPageStartSurah &&
+      ayahNumberInSurah >= nextPageStartAyah
+    ) {
+      return null;
+    }
+
+    const isSingleSurahPage =
+      nextPageStartSurah === undefined || nextPageStartSurah === pageStartSurah;
+    const estimatedAyahsOnPage =
+      isSingleSurahPage && nextPageStartAyah !== undefined
+        ? Math.max(1, nextPageStartAyah - pageStartAyah)
+        : 10;
+
+    const offsetIndex = Math.max(0, ayahNumberInSurah - pageStartAyah);
+    const startFrac = Math.min(0.9, offsetIndex / estimatedAyahsOnPage);
+    const spanFrac = 1 / estimatedAyahsOnPage;
+
+    const rawTop = contentTop + startFrac * contentHeight;
+    const rawHeight = spanFrac * contentHeight;
+    const heightPercent = Math.max(minLineHeight, rawHeight);
+    const maxTop = contentTop + contentHeight - heightPercent;
+    const topPercent = Math.min(Math.max(contentTop, rawTop), Math.max(contentTop, maxTop));
+
+    return {
+      topPercent,
+      leftPercent: contentLeft,
+      widthPercent: contentWidth,
+      heightPercent,
+      surahNumber,
+      ayahNumberInSurah,
+    };
+  }
+
+  return null;
+}
+

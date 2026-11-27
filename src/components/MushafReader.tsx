@@ -1,18 +1,11 @@
 import {
   Bookmark,
-  BookOpenCheck,
-  ChevronLeft,
-  ChevronRight,
   List,
   Loader2,
-  Mic,
-  Moon,
-  Pause,
+  MoreHorizontal,
   Play,
   RotateCcw,
   Search,
-  Sun,
-  WifiOff,
   X,
   ZoomIn,
   ZoomOut,
@@ -43,6 +36,7 @@ import { ReciterSheet } from './ReciterSheet';
 import {
   calculateMushafScale,
   clampValue,
+  computeAyahHighlightRect,
   computeDragVisualOffset,
   determineSwipeAxis,
   evaluateSwipeRelease,
@@ -76,7 +70,7 @@ interface MushafReaderProps {
   onTogglePageCompleted: (page: number) => void; onControlsVisibleChange?: (visible: boolean) => void;
 }
 
-type ModalKind = null | 'index' | 'search' | 'bookmarks' | 'zoom';
+type ModalKind = null | 'index' | 'search' | 'bookmarks' | 'zoom' | 'menu';
 
 export function MushafReader({
   currentPage,
@@ -336,6 +330,10 @@ export function MushafReader({
     return meta?.pages.references?.[currentPage - 1] ?? null;
   }, [meta, currentPage]);
 
+  const nextPageStartRef = useMemo(() => {
+    return meta?.pages.references?.[currentPage] ?? null;
+  }, [meta, currentPage]);
+
   const primarySurah = useMemo(() => {
     const surahNum = pageStartRef?.surah ?? (currentPage === 1 ? 1 : 2);
     const ref = meta?.surahs.references.find((s) => s.number === surahNum);
@@ -506,31 +504,30 @@ export function MushafReader({
     };
   }, [activeTrack, currentPage]);
 
-  // Detect manual page changes vs auto-follow page flips
+  // Detect manual user page navigation vs auto-follow page flips
   useEffect(() => {
     if (lastAutoFlippedPageRef.current === currentPage) {
       lastAutoFlippedPageRef.current = null;
+      setIsSyncedToAudio(true);
       return;
     }
+
+    // Manual navigation: user navigated away from audioPage, or returned to audioPage
     if (activeTrack && audioPage !== null) {
       setIsSyncedToAudio(audioPage === currentPage);
     }
-  }, [currentPage, activeTrack, audioPage]);
+  }, [currentPage]);
 
   // Auto-follow: flip page automatically when active recited ayah moves to a new page
   useEffect(() => {
     if (!isPlaying || !isSyncedToAudio || !activeAudioLocation) {
-      prevAudioPageRef.current = activeAudioLocation?.page ?? null;
       return;
     }
 
     const nextAudioPage = activeAudioLocation.page;
-    const prevAudioPage = prevAudioPageRef.current;
-    prevAudioPageRef.current = nextAudioPage;
-
     if (dragStartRef.current?.active || isTransitioningRef.current) return;
 
-    if (nextAudioPage !== currentPage && nextAudioPage !== prevAudioPage) {
+    if (nextAudioPage !== currentPage) {
       lastAutoFlippedPageRef.current = nextAudioPage;
       onChangePage(nextAudioPage);
     }
@@ -546,7 +543,6 @@ export function MushafReader({
 
   const isAudioSyncedOnCurrentPage = Boolean(
     activeTrack &&
-      isSyncedToAudio &&
       (audioPage !== null
         ? audioPage === currentPage
         : activeTrack.surahNumber === currentPageAnchor.surahNumber)
@@ -558,7 +554,8 @@ export function MushafReader({
     activeTrack &&
       activeTrack.kind === 'surah' &&
       audioPage !== null &&
-      audioPage !== currentPage
+      audioPage !== currentPage &&
+      !isSyncedToAudio
   );
 
   const startPlaybackFromCurrentPage = useCallback(async () => {
@@ -626,19 +623,43 @@ export function MushafReader({
     return () => clearTimeout(t);
   }, [syncNotice]);
 
-  const activePageAyahObj = useMemo(() => {
-    if (!isAudioSyncedOnCurrentPage || !activeAudioLocation || !currentPageData?.ayahs) {
+  const activeAyahHighlight = useMemo(() => {
+    if (!activeTrack || !activeAudioLocation || audioPage !== currentPage) {
       return null;
     }
-    return (
-      currentPageData.ayahs.find(
-        (a) =>
-          a.number === activeAudioLocation.globalAyahNumber ||
-          (a.surah?.number === activeAudioLocation.surahNumber &&
-            a.numberInSurah === activeAudioLocation.ayahNumberInSurah)
-      ) ?? null
-    );
-  }, [activeAudioLocation, currentPageData, isAudioSyncedOnCurrentPage]);
+
+    const pageAyahs =
+      currentPageData && currentPageData.number === currentPage && Array.isArray(currentPageData.ayahs)
+        ? currentPageData.ayahs.map((a) => ({
+            number: a.number,
+            numberInSurah: a.numberInSurah,
+            text: a.text,
+            surahNumber: a.surah?.number ?? activeAudioLocation.surahNumber,
+          }))
+        : null;
+
+    return computeAyahHighlightRect({
+      page: currentPage,
+      surahNumber: activeAudioLocation.surahNumber,
+      ayahNumberInSurah: activeAudioLocation.ayahNumberInSurah,
+      globalAyahNumber: activeAudioLocation.globalAyahNumber,
+      ayahsOnPage: pageAyahs,
+      pageStartSurah: pageStartRef?.surah,
+      pageStartAyah: pageStartRef?.ayah,
+      nextPageStartSurah: nextPageStartRef?.surah,
+      nextPageStartAyah: nextPageStartRef?.ayah,
+    });
+  }, [
+    activeTrack,
+    activeAudioLocation,
+    audioPage,
+    currentPage,
+    currentPageData,
+    pageStartRef?.surah,
+    pageStartRef?.ayah,
+    nextPageStartRef?.surah,
+    nextPageStartRef?.ayah,
+  ]);
 
   const handleSearchSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -857,7 +878,7 @@ export function MushafReader({
 
   return (
     <div className="relative flex-1 min-h-0 w-full h-full bg-[#FAF6EC] overflow-hidden">
-      {/* Compact Single-Row Floating Controls Bar (hidden by default; toggled on page tap) */}
+      {/* Compact Floating Header with Single Menu Button */}
       <header
         onClick={(e) => {
           e.stopPropagation();
@@ -876,202 +897,19 @@ export function MushafReader({
           (controlsVisible ? 'opacity-100' : 'pointer-events-none opacity-0')
         }
       >
-        <div className="mx-auto flex max-w-full flex-nowrap items-center gap-1.5 overflow-x-auto px-2 py-1.5">
-          {/* Index (Surah / Juz / Page) */}
+        <div className="mx-auto flex max-w-4xl items-center justify-start px-3 py-2">
           <button
             type="button"
             onClick={() => {
-              setIndexTab('surah');
-              setActiveModal('index');
+              setPageJumpInput(String(currentPage));
+              setActiveModal('menu');
             }}
-            className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-neutral-200 px-2.5 text-xs font-bold text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
+            aria-label="القائمة"
+            title="القائمة"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-neutral-200 bg-white text-black hover:bg-neutral-50 dark:border-neutral-800 dark:bg-black dark:text-white dark:hover:bg-neutral-900 transition-colors shadow-xs active:scale-95"
           >
-            <List className="h-4 w-4 shrink-0" />
-            <span>{primarySurah.surahName}</span>
-            <span className="text-[11px] font-medium text-neutral-500 dark:text-neutral-400 tabular-nums">
-              · ج{toArabicDigits(currentJuz)}
-            </span>
+            <MoreHorizontal className="h-5 w-5" />
           </button>
-
-          {/* Prev Page */}
-          <button
-            type="button"
-            onClick={() => onChangePage(Math.max(1, currentPage - 1))}
-            disabled={currentPage <= 1}
-            aria-label="الصفحة السابقة"
-            className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-semibold text-black disabled:opacity-35 hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
-          >
-            <ChevronRight className="h-4 w-4 shrink-0" />
-            <span>السابقة</span>
-          </button>
-
-          {/* Direct Page Jump */}
-          <form onSubmit={handlePageJumpSubmit} className="flex shrink-0 items-center gap-1">
-            <input
-              type="number"
-              aria-label="رقم الصفحة من ١ إلى ٦٠٤"
-              min={1}
-              max={604}
-              value={pageJumpInput}
-              onChange={(e) => setPageJumpInput(e.target.value)}
-              className="h-10 w-14 rounded-xl border border-neutral-200 bg-white px-1.5 text-center text-xs font-bold tabular-nums text-black focus:border-black focus:outline-none dark:border-neutral-800 dark:bg-black dark:text-white dark:focus:border-white"
-            />
-            <span className="text-[11px] text-neutral-500 dark:text-neutral-400 tabular-nums whitespace-nowrap">
-              /{toArabicDigits(604)}
-            </span>
-            <button
-              type="submit"
-              className="h-10 rounded-xl border border-neutral-200 px-2.5 text-xs font-semibold text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
-            >
-              انتقال
-            </button>
-          </form>
-
-          {/* Next Page */}
-          <button
-            type="button"
-            onClick={() => onChangePage(Math.min(604, currentPage + 1))}
-            disabled={currentPage >= 604}
-            aria-label="الصفحة التالية"
-            className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-semibold text-black disabled:opacity-35 hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
-          >
-            <span>التالية</span>
-            <ChevronLeft className="h-4 w-4 shrink-0" />
-          </button>
-
-          {/* Play / Pause Surah Audio */}
-          <button
-            type="button"
-            onClick={() => void handlePlayPageSurah()}
-            aria-label={isPlayingCurrentPage ? 'إيقاف تلاوة الصفحة' : 'تشغيل تلاوة الصفحة'}
-            title="تشغيل تلاوة الصفحة"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-black text-white dark:bg-white dark:text-black transition-transform active:scale-95"
-          >
-            {isPlayingCurrentPage ? (
-              <Pause className="h-4 w-4" />
-            ) : (
-              <Play className="h-4 w-4" />
-            )}
-          </button>
-
-          {/* Reciter Picker */}
-          <button
-            type="button"
-            onClick={() => setReciterSheetOpen(true)}
-            aria-label="اختيار القارئ"
-            title="اختيار القارئ"
-            className="flex h-10 shrink-0 items-center gap-1.5 rounded-xl border border-neutral-200 px-2.5 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
-          >
-            <Mic className="h-4 w-4 shrink-0" />
-            <span className="max-w-[100px] truncate">
-              {currentReciter ? currentReciter.name : 'القارئ'}
-            </span>
-          </button>
-
-          {/* Bookmark Current Page */}
-          <button
-            type="button"
-            onClick={() =>
-              onToggleBookmark({
-                id: `page:${currentPage}`,
-                type: 'page',
-                page: currentPage,
-                surahNumber: primarySurah.surahNumber,
-                surahName: primarySurah.surahName,
-                createdAt: Date.now(),
-              })
-            }
-            className={
-              'flex h-10 shrink-0 items-center gap-1 rounded-xl border px-2.5 text-xs font-medium transition-colors whitespace-nowrap ' +
-              (isPageBookmarked
-                ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-                : 'border-neutral-200 text-neutral-700 hover:text-black dark:border-neutral-800 dark:text-neutral-300 dark:hover:text-white')
-            }
-          >
-            <Bookmark className="h-3.5 w-3.5 shrink-0" fill={isPageBookmarked ? 'currentColor' : 'none'} />
-            <span>{isPageBookmarked ? 'محفوظة' : 'حفظ الصفحة'}</span>
-          </button>
-
-          {/* Mark Page Completed for Khatma */}
-          <button
-            type="button"
-            onClick={() => onTogglePageCompleted(currentPage)}
-            aria-label="تحديد كمقروءة للختمة"
-            className={
-              'flex h-10 shrink-0 items-center gap-1 rounded-xl border px-2.5 text-xs font-semibold transition-colors whitespace-nowrap ' +
-              (isPageCompleted
-                ? 'border-black bg-black text-white dark:border-white dark:bg-white dark:text-black'
-                : 'border-neutral-200 text-neutral-700 hover:text-black dark:border-neutral-800 dark:text-neutral-300 dark:hover:text-white')
-            }
-          >
-            <BookOpenCheck className="h-3.5 w-3.5 shrink-0" />
-            <span>{isPageCompleted ? 'تمت قراءة الصفحة' : 'تحديد كمقروءة'}</span>
-          </button>
-
-          {/* Resume Last Read */}
-          {lastRead && lastRead.page !== currentPage && (
-            <button
-              type="button"
-              onClick={() => onChangePage(lastRead.page)}
-              className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
-            >
-              <span>متابعة (ص {toArabicDigits(lastRead.page)})</span>
-            </button>
-          )}
-
-          {/* Search Quran */}
-          <button
-            type="button"
-            onClick={() => setActiveModal('search')}
-            aria-label="بحث في القرآن"
-            title="بحث في القرآن"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-neutral-200 text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
-          >
-            <Search className="h-4 w-4" />
-          </button>
-
-          {/* Bookmarks List */}
-          <button
-            type="button"
-            onClick={() => setActiveModal('bookmarks')}
-            aria-label="العلامات المرجعية"
-            title="العلامات المرجعية"
-            className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
-          >
-            <Bookmark className="h-4 w-4 shrink-0" />
-            <span>العلامات</span>
-          </button>
-
-          {/* Zoom */}
-          <button
-            type="button"
-            onClick={() => setActiveModal('zoom')}
-            aria-label="تكبير وتصغير عرض الصفحة"
-            title="تكبير وتصغير عرض الصفحة"
-            className="flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-xs font-medium text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950 whitespace-nowrap"
-          >
-            <ZoomIn className="h-4 w-4 shrink-0" />
-            <span className="tabular-nums">{toArabicDigits(pageZoom)}%</span>
-          </button>
-
-          {/* Dark Mode Toggle */}
-          <button
-            type="button"
-            onClick={onToggleDark}
-            aria-label={isDark ? 'الوضع الفاتح' : 'الوضع الليلي'}
-            title={isDark ? 'الوضع الفاتح' : 'الوضع الليلي'}
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-neutral-200 text-black hover:bg-neutral-50 dark:border-neutral-800 dark:text-white dark:hover:bg-neutral-950"
-          >
-            {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
-
-          {/* Offline / Cached Indicator */}
-          {(fromCache || isOffline) && (
-            <span className="inline-flex h-10 shrink-0 items-center gap-1 rounded-xl border border-neutral-200 px-2.5 text-[11px] font-medium text-black dark:border-neutral-800 dark:text-white whitespace-nowrap">
-              <WifiOff className="h-3.5 w-3.5 shrink-0" />
-              <span>{isOffline ? 'دون اتصال' : 'محفوظ'}</span>
-            </span>
-          )}
         </div>
       </header>
 
@@ -1139,6 +977,20 @@ export function MushafReader({
                   className="block object-contain pointer-events-none select-none"
                 />
               )}
+              {/* Translucent yellow highlight behind/over active recited ayah */}
+              {activeAyahHighlight && (
+                <div
+                  data-testid="ayah-highlight"
+                  aria-hidden="true"
+                  className="absolute pointer-events-none transition-all duration-300 ease-out rounded-xl bg-yellow-400/35 border border-amber-400/60 shadow-xs mix-blend-multiply"
+                  style={{
+                    top: `${activeAyahHighlight.topPercent}%`,
+                    left: `${activeAyahHighlight.leftPercent}%`,
+                    width: `${activeAyahHighlight.widthPercent}%`,
+                    height: `${activeAyahHighlight.heightPercent}%`,
+                  }}
+                />
+              )}
               {loading && pageSvgUrl && (
                 <div className="absolute inset-0 flex items-center justify-center bg-[#FAF6EC]/30 pointer-events-none">
                   <Loader2 className="h-6 w-6 animate-spin text-black/50" />
@@ -1179,27 +1031,107 @@ export function MushafReader({
         </div>
       )}
 
-      {!isAudioOnDifferentPage && isAudioSyncedOnCurrentPage && activeAudioLocation && (
-        <div className="fixed bottom-[150px] left-3 right-3 z-20 flex justify-center pointer-events-none">
-          <div className="max-w-md rounded-2xl border border-neutral-200/90 bg-white/92 px-3.5 py-1.5 text-center shadow-xs backdrop-blur-md dark:border-neutral-800 dark:bg-black/92">
-            <div className="text-[11px] font-bold text-black dark:text-white">
-              {meta?.surahs.references.find((s) => s.number === activeAudioLocation.surahNumber)?.name ??
-                primarySurah.surahName}{' '}
-              · الآية {toArabicDigits(activeAudioLocation.ayahNumberInSurah)}
-            </div>
-            {activePageAyahObj?.text && (
-              <p className="mt-0.5 truncate font-quran text-xs text-neutral-600 dark:text-neutral-300">
-                {activePageAyahObj.text}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
       {syncNotice && (
         <div className="fixed top-16 left-3 right-3 z-40 flex justify-center pointer-events-none">
           <div className="rounded-xl border border-neutral-300 bg-white px-4 py-2 text-xs font-semibold text-black shadow-sm dark:border-neutral-700 dark:bg-black dark:text-white">
             {syncNotice}
+          </div>
+        </div>
+      )}
+
+      {/* 2-Column Grid Page Menu Modal */}
+      {activeModal === 'menu' && (
+        <div
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-xs"
+          onClick={() => setActiveModal(null)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="قائمة الصفحة"
+            className="flex w-full max-w-md flex-col rounded-t-3xl sm:rounded-3xl border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-black shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="text-base font-bold text-black dark:text-white">خيارات الصفحة</h2>
+              <button
+                type="button"
+                onClick={() => setActiveModal(null)}
+                aria-label="إغلاق القائمة"
+                className="flex h-10 w-10 items-center justify-center rounded-full text-neutral-500 hover:bg-neutral-100 dark:hover:bg-neutral-900"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              {/* Tile 1: Surah & Juz Selector */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIndexTab('surah');
+                  setActiveModal('index');
+                }}
+                className="flex min-h-[96px] flex-col items-center justify-center gap-1.5 rounded-2xl border border-neutral-200 bg-neutral-50 p-4 text-center transition-all hover:bg-neutral-100 active:scale-98 dark:border-neutral-800 dark:bg-neutral-900 dark:hover:bg-neutral-800/80"
+                aria-label="محدد السورة والفهرس"
+              >
+                <span className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
+                  السورة والجزء
+                </span>
+                <span className="truncate max-w-full font-bold text-sm text-black dark:text-white">
+                  {primarySurah.surahName}
+                </span>
+                <span className="text-xs text-neutral-600 dark:text-neutral-300">
+                  الجزء {toArabicDigits(currentJuz)}
+                </span>
+              </button>
+
+              {/* Tile 2: Page Display */}
+              <button
+                type="button"
+                onClick={() => {
+                  setIndexTab('page');
+                  setActiveModal('index');
+                }}
+                className="flex min-h-[96px] flex-col items-center justify-center gap-1.5 rounded-2xl border border-neutral-200 bg-neutral-50 p-4 text-center transition-all hover:bg-neutral-100 active:scale-98 dark:border-neutral-800 dark:bg-neutral-900 dark:hover:bg-neutral-800/80"
+                aria-label="رقم الصفحة الحالية"
+              >
+                <span className="text-xs font-medium text-neutral-500 dark:text-neutral-400">
+                  الصفحة الحالية
+                </span>
+                <span className="font-bold text-lg text-black dark:text-white">
+                  {toArabicDigits(currentPage)} / {toArabicDigits(604)}
+                </span>
+                <span className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                  انقر لفتح الفهرس
+                </span>
+              </button>
+
+              {/* Tile 3: Page Jump */}
+              <div className="col-span-2 rounded-2xl border border-neutral-200 bg-neutral-50 p-4 dark:border-neutral-800 dark:bg-neutral-900">
+                <span className="mb-2 block text-center text-xs font-medium text-neutral-500 dark:text-neutral-400">
+                  انتقال سريع إلى صفحة
+                </span>
+                <form onSubmit={handlePageJumpSubmit} className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={1}
+                    max={604}
+                    value={pageJumpInput}
+                    onChange={(e) => setPageJumpInput(e.target.value)}
+                    placeholder="رقم الصفحة (1-604)"
+                    aria-label="رقم الصفحة للانتقال إليها"
+                    className="w-full rounded-xl border border-neutral-300 bg-white px-3 py-2 text-center text-sm font-semibold text-black focus:border-black focus:outline-none dark:border-neutral-700 dark:bg-black dark:text-white dark:focus:border-white"
+                  />
+                  <button
+                    type="submit"
+                    className="shrink-0 rounded-xl bg-black px-4 py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 active:scale-95 dark:bg-white dark:text-black"
+                  >
+                    انتقال
+                  </button>
+                </form>
+              </div>
+            </div>
           </div>
         </div>
       )}
