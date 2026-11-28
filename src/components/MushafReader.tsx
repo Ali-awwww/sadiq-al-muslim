@@ -3,6 +3,7 @@ import {
   List,
   Loader2,
   MoreHorizontal,
+  Pause,
   Play,
   RotateCcw,
   Search,
@@ -1131,6 +1132,31 @@ export function MushafReader({
                   </button>
                 </form>
               </div>
+
+              {/* Tile 4: Listen from this page */}
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveModal(null);
+                  void handlePlayPageSurah();
+                }}
+                className="col-span-2 flex min-h-[64px] flex-row items-center justify-center gap-2 rounded-2xl bg-black px-4 py-3 text-center text-white transition-all hover:opacity-90 active:scale-98 dark:bg-white dark:text-black"
+                aria-label={isPlayingCurrentPage ? 'إيقاف التلاوة مؤقتاً' : 'استمع من هذه الصفحة'}
+              >
+                {isPlayingCurrentPage ? (
+                  <Pause className="h-5 w-5 shrink-0" />
+                ) : (
+                  <Play className="h-5 w-5 shrink-0" />
+                )}
+                <span className="text-sm font-bold">
+                  {isPlayingCurrentPage ? 'إيقاف مؤقت' : 'استمع من هذه الصفحة'}
+                </span>
+                {currentReciter && (
+                  <span className="text-xs font-medium opacity-70">
+                    · {currentReciter.name}
+                  </span>
+                )}
+              </button>
             </div>
           </div>
         </div>
