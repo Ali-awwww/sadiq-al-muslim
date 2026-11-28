@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { Loader2, RotateCcw } from 'lucide-react';
-import { fetchSurahUthmani } from '../lib/api';
+import { Loader2, RotateCcw, X } from 'lucide-react';
+import { fetchIbnKathirByAyah, fetchSurahUthmani } from '../lib/api';
+import { sanitizeTafsirHtml } from '../lib/sanitize';
 import {
   BASMALA_UTHMANI,
   getRevelationLabel,
@@ -31,6 +32,12 @@ interface VisibleInfo {
   hizbQuarter?: number;
   global: number;
 }
+
+/** Small ornate medallion holding the ayah number inside it, flowing inline
+ *  with the text like the printed Mushaf — a bordered pill, the digits
+ *  centred inside it, no margins, so the text flows continuously. */
+const AYAH_MARKER_CLASS =
+  'whitespace-nowrap rounded-full border border-amber-700/70 bg-amber-500/10 px-[0.32em] py-[0.06em] align-middle text-[0.6em] font-bold leading-none text-amber-700 dark:border-amber-400/70 dark:bg-amber-400/10 dark:text-amber-400';
 
 /** «الحزب ٣» / «الحزب ٣ · ربع الحزب» / «… · نصف الحزب» / «… · ثلاثة أرباع الحزب» */
 function hizbLabel(hizbQuarter?: number): string | null {
@@ -69,6 +76,13 @@ export function TextReader({
   const [error, setError] = useState<string | null>(null);
   const [selectedGlobal, setSelectedGlobal] = useState<number | null>(null);
   const [visibleInfo, setVisibleInfo] = useState<VisibleInfo | null>(null);
+  // Ibn Kathir tafsir for the selected ayah (bottom sheet).
+  const [tafsirHtml, setTafsirHtml] = useState<string | null>(null);
+  const [tafsirLoading, setTafsirLoading] = useState(false);
+  const [tafsirError, setTafsirError] = useState<string | null>(null);
+
+  const selectedAyah =
+    surahData?.ayahs.find((a) => a.number === selectedGlobal) ?? null;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const ayahElsRef = useRef<Map<number, HTMLSpanElement>>(new Map());
@@ -94,6 +108,59 @@ export function TextReader({
       setLoading(false);
     }
   }, [surahNumber]);
+
+  const loadTafsirFor = useCallback(
+    (ayahNumberInSurah: number) => {
+      setTafsirLoading(true);
+      setTafsirError(null);
+      setTafsirHtml(null);
+      void fetchIbnKathirByAyah(surahNumber, ayahNumberInSurah)
+        .then((res) => setTafsirHtml(sanitizeTafsirHtml(res.data.text)))
+        .catch((err: unknown) => {
+          setTafsirError(
+            err instanceof Error
+              ? err.message
+              : 'تعذر تحميل التفسير. تحقق من الاتصال بالإنترنت.'
+          );
+        })
+        .finally(() => setTafsirLoading(false));
+    },
+    [surahNumber]
+  );
+
+  // Load the tafsir whenever the selected ayah changes; close the sheet
+  // (clear the tafsir) when nothing is selected.
+  useEffect(() => {
+    if (!selectedAyah) {
+      setTafsirHtml(null);
+      setTafsirError(null);
+      setTafsirLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setTafsirLoading(true);
+    setTafsirError(null);
+    setTafsirHtml(null);
+    void fetchIbnKathirByAyah(surahNumber, selectedAyah.numberInSurah)
+      .then((res) => {
+        if (!cancelled) setTafsirHtml(sanitizeTafsirHtml(res.data.text));
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setTafsirError(
+            err instanceof Error
+              ? err.message
+              : 'تعذر تحميل التفسير. تحقق من الاتصال بالإنترنت.'
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setTafsirLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAyah, surahNumber]);
 
   useEffect(() => {
     setSelectedGlobal(null);
@@ -226,6 +293,13 @@ export function TextReader({
         null)
       : null;
 
+  // The text shown for an ayah: ayah 1 without its leading Basmala
+  // (shown as its own line above), everything else as-is.
+  const getDisplayText = (ayah: Ayah): string =>
+    ayah.numberInSurah === 1 && surahNumber !== 1 && surahNumber !== 9
+      ? firstAyahDisplay
+      : cleanAyahText(ayah.text);
+
   return (
     <div className="relative h-full w-full overflow-hidden bg-[#FAF6EC] text-neutral-900 dark:bg-[#16130e] dark:text-neutral-100">
       <div
@@ -288,12 +362,7 @@ export function TextReader({
               style={{ fontSize: fontSizePx, lineHeight: 2.15 }}
             >
               {surahData.ayahs.map((ayah: Ayah) => {
-                const displayText =
-                  ayah.numberInSurah === 1 &&
-                  surahNumber !== 1 &&
-                  surahNumber !== 9
-                    ? firstAyahDisplay
-                    : cleanAyahText(ayah.text);
+                const displayText = getDisplayText(ayah);
                 const isAudio = audioGlobalAyah === ayah.number;
                 const isSelected = selectedGlobal === ayah.number;
                 const highlightClass =
@@ -326,12 +395,9 @@ export function TextReader({
                         WebkitBoxDecorationBreak: 'clone',
                       }}
                     >
-                      {displayText}
-                      <span
-                        aria-hidden="true"
-                        className="mx-1 inline-block align-middle text-[0.55em] font-bold text-amber-700 dark:text-amber-400"
-                      >
-                        ۝{toArabicDigits(ayah.numberInSurah)}
+                      {displayText}{'\u00A0'}
+                      <span aria-hidden="true" className={AYAH_MARKER_CLASS}>
+                        {toArabicDigits(ayah.numberInSurah)}
                       </span>
                     </span>{' '}
                   </Fragment>
@@ -374,8 +440,77 @@ export function TextReader({
         ) : null}
       </div>
 
+      {/* Tafsir bottom sheet: tapping an ayah shows its text + Ibn Kathir tafsir.
+          It sits above the scroll area (a sibling, not a child), so taps inside
+          it never reach the container's empty-space handler. */}
+      {selectedAyah && (
+        <div
+          dir="rtl"
+          role="dialog"
+          aria-label={`تفسير الآية ${toArabicDigits(selectedAyah.numberInSurah)}`}
+          className={`absolute inset-x-0 z-30 flex max-h-[62%] flex-col overflow-hidden rounded-t-3xl border-t border-neutral-300/70 bg-[#FAF6EC] shadow-2xl dark:border-neutral-700 dark:bg-[#16130e] ${
+            hasActiveAudio ? 'bottom-[136px]' : 'bottom-0'
+          }`}
+        >
+          <div className="flex shrink-0 justify-center pt-2">
+            <span className="h-1.5 w-12 rounded-full bg-neutral-300 dark:bg-neutral-700" />
+          </div>
+          <div className="flex shrink-0 items-center justify-between gap-2 px-4 pb-2 pt-1">
+            <div className="text-sm font-bold text-neutral-900 dark:text-neutral-100">
+              تفسير ابن كثير · الآية{' '}
+              {toArabicDigits(selectedAyah.numberInSurah)}
+            </div>
+            <button
+              type="button"
+              aria-label="إغلاق التفسير"
+              onClick={() => setSelectedGlobal(null)}
+              className="flex min-h-[36px] min-w-[36px] items-center justify-center rounded-full text-neutral-600 hover:bg-neutral-200/70 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto px-4 pb-6">
+            <p className="font-quran mb-4 text-justify text-[22px] leading-[2.1] text-neutral-900 dark:text-neutral-100">
+              {getDisplayText(selectedAyah)}{'\u00A0'}
+              <span aria-hidden="true" className={AYAH_MARKER_CLASS}>
+                {toArabicDigits(selectedAyah.numberInSurah)}
+              </span>
+            </p>
+            {tafsirLoading ? (
+              <div className="flex flex-col items-center justify-center gap-3 py-10 text-sm text-neutral-600 dark:text-neutral-300">
+                <Loader2 className="h-6 w-6 animate-spin text-black dark:text-white" />
+                <span>جارٍ تحميل التفسير...</span>
+              </div>
+            ) : tafsirError ? (
+              <div className="flex flex-col items-center justify-center gap-3 py-8 text-center">
+                <p className="text-sm text-neutral-700 dark:text-neutral-300">
+                  {tafsirError}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => loadTafsirFor(selectedAyah.numberInSurah)}
+                  className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-black px-5 py-2.5 text-xs font-semibold text-white dark:bg-white dark:text-black"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  <span>إعادة المحاولة</span>
+                </button>
+              </div>
+            ) : tafsirHtml ? (
+              <div
+                className="text-sm leading-[2] text-neutral-800 dark:text-neutral-200 [&_p]:mb-3 [&_.blue]:font-bold [&_.blue]:text-black dark:[&_.blue]:text-white [&_.arabic]:font-quran [&_.arabic]:text-lg"
+                dangerouslySetInnerHTML={{ __html: tafsirHtml }}
+              />
+            ) : (
+              <p className="py-4 text-center text-sm text-neutral-500 dark:text-neutral-400">
+                لا يتوفر نص تفسير لهذه الآية.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Bottom indicator: Mushaf page + hizb of the visible text */}
-      {visibleInfo && (
+      {visibleInfo && !selectedAyah && (
         <div
           dir="rtl"
           className={`absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-full border border-neutral-300/70 bg-white/90 px-4 py-2 text-xs font-bold text-neutral-800 shadow-lg backdrop-blur dark:border-neutral-700 dark:bg-black/85 dark:text-neutral-100 ${
