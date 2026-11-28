@@ -1,5 +1,7 @@
 import {
   Bookmark,
+  BookOpenText,
+  Image,
   List,
   Loader2,
   MoreHorizontal,
@@ -34,6 +36,7 @@ import type {
   SearchMatch,
 } from '../types/quran';
 import { ReciterSheet } from './ReciterSheet';
+import { TextReader } from './TextReader';
 import {
   calculateMushafScale,
   clampValue,
@@ -118,6 +121,9 @@ export function MushafReader({
   const [pageJumpInput, setPageJumpInput] = useState(String(currentPage));
 
   const [reciterSheetOpen, setReciterSheetOpen] = useState(false);
+
+  // Text reading mode: flowing Uthmani text instead of the framed page image
+  const [textMode, setTextMode] = useState(false);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchMatch[]>([]);
@@ -618,6 +624,17 @@ export function MushafReader({
     await startPlaybackFromCurrentPage();
   };
 
+  // Text mode: keep the reader's current page in sync with the text the
+  // user is actually reading, so last-read, bookmarks and the return to
+  // page-image mode all land on the right page.
+  const handleTextVisiblePageChange = useCallback(
+    (page: number) => {
+      if (page < 1 || page > 604 || page === currentPage) return;
+      onChangePage(page);
+    },
+    [currentPage, onChangePage]
+  );
+
   useEffect(() => {
     if (!syncNotice) return;
     const t = setTimeout(() => setSyncNotice(null), 4000);
@@ -914,7 +931,27 @@ export function MushafReader({
         </div>
       </header>
 
-      {/* Authentic Madani Mushaf SVG Page Canvas: Edge-to-edge uniform scaling with DOM-direct swipe/pan */}
+      {/* Text mode: flowing Uthmani text, continuous scroll (no framed page image) */}
+      {textMode ? (
+        <TextReader
+          surahNumber={primarySurah.surahNumber}
+          surahName={primarySurah.surahName}
+          meta={meta}
+          anchorGlobalAyah={currentPageAnchor.globalAyahNumber}
+          audioGlobalAyah={activeAyahGlobalNumber}
+          isAudioPlaying={isPlaying}
+          hasActiveAudio={activeTrack !== null}
+          textSizePercent={pageZoom}
+          onVisiblePageChange={handleTextVisiblePageChange}
+          onToggleControls={() =>
+            setControlsVisible((prev) => {
+              if (prev) clearHideTimer();
+              return !prev;
+            })
+          }
+        />
+      ) : (
+      /* Authentic Madani Mushaf SVG Page Canvas: Edge-to-edge uniform scaling with DOM-direct swipe/pan */
       <main
         ref={viewportRef}
         dir="ltr"
@@ -1001,6 +1038,7 @@ export function MushafReader({
           )}
         </div>
       </main>
+      )}
 
       {/* Audio Sync Action Bar (when audio is playing on another page) or Live Ayah Indicator */}
       {isAudioOnDifferentPage && audioPage !== null && (
@@ -1156,6 +1194,45 @@ export function MushafReader({
                     · {currentReciter.name}
                   </span>
                 )}
+              </button>
+
+              {/* Tile 5: Text mode / Page-image mode toggle */}
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveModal(null);
+                  setTextMode((prev) => !prev);
+                }}
+                className="flex min-h-[96px] flex-col items-center justify-center gap-1.5 rounded-2xl border border-neutral-200 bg-neutral-50 p-4 text-center transition-all hover:bg-neutral-100 active:scale-98 dark:border-neutral-800 dark:bg-neutral-900 dark:hover:bg-neutral-800/80"
+                aria-label={textMode ? 'عرض صفحة المصحف' : 'عرض نصي'}
+              >
+                {textMode ? (
+                  <Image className="h-6 w-6 text-black dark:text-white" />
+                ) : (
+                  <BookOpenText className="h-6 w-6 text-black dark:text-white" />
+                )}
+                <span className="text-sm font-bold text-black dark:text-white">
+                  {textMode ? 'عرض صفحة المصحف' : 'عرض نصي'}
+                </span>
+                <span className="text-[11px] text-neutral-500 dark:text-neutral-400">
+                  {textMode ? 'العودة لصورة الصفحة' : 'نص متصل بلا إطار'}
+                </span>
+              </button>
+
+              {/* Tile 6: Text size (opens the size slider) */}
+              <button
+                type="button"
+                onClick={() => setActiveModal('zoom')}
+                className="flex min-h-[96px] flex-col items-center justify-center gap-1.5 rounded-2xl border border-neutral-200 bg-neutral-50 p-4 text-center transition-all hover:bg-neutral-100 active:scale-98 dark:border-neutral-800 dark:bg-neutral-900 dark:hover:bg-neutral-800/80"
+                aria-label="حجم النص"
+              >
+                <ZoomIn className="h-6 w-6 text-black dark:text-white" />
+                <span className="text-sm font-bold text-black dark:text-white">
+                  حجم النص
+                </span>
+                <span className="text-xs text-neutral-600 dark:text-neutral-300">
+                  {toArabicDigits(pageZoom)}%
+                </span>
               </button>
             </div>
           </div>
@@ -1508,13 +1585,13 @@ export function MushafReader({
           <div
             role="dialog"
             aria-modal="true"
-            aria-label="تكبير وتصغير عرض الصفحة"
+            aria-label={textMode ? 'تكبير وتصغير حجم النص' : 'تكبير وتصغير عرض الصفحة'}
             className="w-full max-w-md rounded-t-3xl sm:rounded-3xl border border-neutral-200 bg-white p-5 dark:border-neutral-800 dark:bg-black"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-base font-bold text-black dark:text-white">
-                حجم عرض صفحة المصحف
+                {textMode ? 'حجم النص' : 'حجم عرض صفحة المصحف'}
               </h2>
               <button
                 type="button"
@@ -1528,13 +1605,13 @@ export function MushafReader({
 
             <div className="space-y-4">
               <div className="flex items-center justify-between text-xs font-semibold">
-                <span>العرض</span>
+                <span>{textMode ? 'حجم الخط' : 'العرض'}</span>
                 <span className="tabular-nums">{toArabicDigits(pageZoom)}%</span>
               </div>
               <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  aria-label="تصغير عرض الصفحة"
+                  aria-label={textMode ? 'تصغير حجم النص' : 'تصغير عرض الصفحة'}
                   onClick={() => onChangePageZoom(Math.max(60, pageZoom - 10))}
                   className="flex h-10 w-12 items-center justify-center rounded-xl border border-neutral-200 text-black dark:border-neutral-800 dark:text-white"
                 >
@@ -1542,7 +1619,7 @@ export function MushafReader({
                 </button>
                 <input
                   type="range"
-                  aria-label="نسبة عرض الصفحة"
+                  aria-label={textMode ? 'نسبة حجم النص' : 'نسبة عرض الصفحة'}
                   min={60}
                   max={130}
                   step={5}
@@ -1552,7 +1629,7 @@ export function MushafReader({
                 />
                 <button
                   type="button"
-                  aria-label="تكبير عرض الصفحة"
+                  aria-label={textMode ? 'تكبير حجم النص' : 'تكبير عرض الصفحة'}
                   onClick={() => onChangePageZoom(Math.min(130, pageZoom + 10))}
                   className="flex h-10 w-12 items-center justify-center rounded-xl border border-neutral-200 text-black dark:border-neutral-800 dark:text-white"
                 >
