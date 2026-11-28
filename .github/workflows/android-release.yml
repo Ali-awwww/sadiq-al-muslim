@@ -1,7 +1,7 @@
 name: Android release (signed APK)
 
 # يبني APK موقّعاً للإصدار من مشروع Android، ويتحقق أن توقيعه وبصمته
-# SHA-256 يطابقان الـ Keystore الجديد، ثم ينشئ إصدار GitHub v1.4.5
+# SHA-256 يطابقان الـ Keystore الجديد، ثم ينشئ إصدار GitHub v1.4.6
 # مرفقاً به الـ APK عند طلب ذلك.
 #
 # الأسرار المطلوبة في المستودع:
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: 'إنشاء إصدار GitHub v1.4.5 مرفقاً به الـ APK؟'
+        description: 'إنشاء إصدار GitHub v1.4.6 مرفقاً به الـ APK؟'
         required: true
         type: boolean
         default: true
@@ -27,7 +27,7 @@ on:
         description: 'وسم الإصدار'
         required: true
         type: string
-        default: v1.4.5
+        default: v1.4.6
   push:
     branches: [main]
     paths:
@@ -168,18 +168,18 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sadiq-al-muslim-v1.4.5-apk
+          name: sadiq-al-muslim-v1.4.6-apk
           path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
-      - name: Create GitHub release v1.4.5
+      - name: Create GitHub release v1.4.6
         if: ${{ inputs.create_release && steps.verify.outputs.sha256 != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
-          name: "صديق المسلم v1.4.5"
+          name: "صديق المسلم v1.4.6"
           body: |
-            الإصدار 1.4.5 من تطبيق «صديق المسلم» (versionCode 10) — حل مشكلة تجاوز الشريط العلوي في قارئ المصحف على الشاشات الصغيرة عبر استبدال العناصر بزر أيقونة واحد (⋯)، وفتح قائمة شبكية بعمودين تحتوي محدد السورة وعرض الصفحة والانتقال السريع، مع إزالة أزرار التقليب اليدوية والاكتفاء بالسحب. بالإضافة إلى حذف بطاقة الآية العائمة فوق المشغّل، وتظليل الآية المقروءة مباشرة على صفحة المصحف بتمييز أصفر شفاف يتبع التلاوة وصوت القارئ تلقائياً.
+            الإصدار 1.4.6 من تطبيق «صديق المسلم» (versionCode 11) — إعادة زر الاستماع إلى قارئ المصحف: زر «استمع من هذه الصفحة» في قائمة خيارات الصفحة (⋯) يبدأ التلاوة من الصفحة الحالية مع القارئ المختار ويُظهر مشغل التلاوة، ويتحول إلى «إيقاف مؤقت» أثناء التشغيل. الحفاظ الكامل على كل مميزات v1.4.5.
 
             - مصحف متكامل على الويب: قراءة بالرسم العثماني، تلاوة القراء، تفسير، حفظ، وتتبع الختمة.
             - تمييز أصفر شفاف للآية الحالية مباشرة على صفحة المصحف يواكب الصوت وانتقال الصفحات.
