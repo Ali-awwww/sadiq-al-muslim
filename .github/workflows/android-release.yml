@@ -1,7 +1,7 @@
 name: Android release (signed APK)
 
 # يبني APK موقّعاً للإصدار من مشروع Android، ويتحقق أن توقيعه وبصمته
-# SHA-256 يطابقان الـ Keystore الجديد، ثم ينشئ إصدار GitHub v1.4.7
+# SHA-256 يطابقان الـ Keystore الجديد، ثم ينشئ إصدار GitHub v1.4.8
 # مرفقاً به الـ APK عند طلب ذلك.
 #
 # الأسرار المطلوبة في المستودع:
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       create_release:
-        description: 'إنشاء إصدار GitHub v1.4.7 مرفقاً به الـ APK؟'
+        description: 'إنشاء إصدار GitHub v1.4.8 مرفقاً به الـ APK؟'
         required: true
         type: boolean
         default: true
@@ -27,7 +27,7 @@ on:
         description: 'وسم الإصدار'
         required: true
         type: string
-        default: v1.4.7
+        default: v1.4.8
   push:
     branches: [main]
     paths:
@@ -168,18 +168,18 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sadiq-al-muslim-v1.4.7-apk
+          name: sadiq-al-muslim-v1.4.8-apk
           path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
-      - name: Create GitHub release v1.4.7
+      - name: Create GitHub release v1.4.8
         if: ${{ inputs.create_release && steps.verify.outputs.sha256 != '' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
-          name: "صديق المسلم v1.4.7"
+          name: "صديق المسلم v1.4.8"
           body: |
-            الإصدار 1.4.7 من تطبيق «صديق المسلم» (versionCode 12) — الوضع النصي الجديد: قراءة بنص عثماني متصل يملأ الشاشة بلا إطار، مع الضغط على الآية لتمييزها بإطار، ومؤشر أسفل الشاشة برقم صفحة المصحف والحزب، وضبط حجم النص من قائمة خيارات الصفحة (⋯)، والاستماع يعمل في الوضع النصي مع تمييز أصفر للآية الحالية وتمرير تلقائي لها. الحفاظ الكامل على كل مميزات v1.4.6.
+            الإصدار 1.4.8 من تطبيق «صديق المسلم» (versionCode 13) — في الوضع النصي: الضغط على الآية يفتح تفسير ابن كثير في لوحة سفلية، وعلامة رقم الآية أصبحت ميدالية مزخرفة تحتوي الرقم بداخلها كما في المصحف، وإزالة الفاصل الزائد بعد رقم الآية ليتدفق النص متصلاً. الحفاظ الكامل على كل مميزات v1.4.7.
 
             - مصحف متكامل على الويب: قراءة بالرسم العثماني، تلاوة القراء، تفسير، حفظ، وتتبع الختمة.
             - تمييز أصفر شفاف للآية الحالية مباشرة على صفحة المصحف يواكب الصوت وانتقال الصفحات.
